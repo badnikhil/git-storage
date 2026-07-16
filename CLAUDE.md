@@ -8,9 +8,20 @@ README.md carries the project's policy commitments — never contradict them
 (no unlimited storage, no auto repo-fleet expansion, no circumvention features).
 
 ## Status
-- M0 complete: walking-skeleton CLI (fixed-size chunks → BLAKE3 objects →
-  JSON manifests → local git repo). Spec cleanup + review-round-1 fixes landed.
-- Next: M1 (FastCDC content-defined chunking). See IMPLEMENTATION-PLAN.md.
+- M0 complete: walking-skeleton CLI (put/get/ls, BLAKE3 content addressing,
+  JSON manifests, local git store repos). Spec cleanup + review fixes landed.
+- M1 complete: FastCDC content-defined chunking with per-store randomized gear
+  seed; store config pins chunker params (conflicting --chunk-size refused).
+- Next: M2 (zstd + XChaCha20-Poly1305, keyed convergent). See IMPLEMENTATION-PLAN.md.
+
+## Git safety rules (hard requirements)
+- The CLI performs LOCAL git ops only (init/add/diff/commit). Never add a
+  network git command (push/fetch/clone/pull) outside the M4 backend layer.
+- Every git invocation goes through store.rs::git_command(): terminal prompts
+  disabled, fixed tool identity, gpgsign off. Keep it that way.
+- Tests must NEVER touch the user's git config or credentials: spawn the CLI
+  only via the isolated-env helper in tests/roundtrip.rs (HOME=tempdir,
+  GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, GIT_TERMINAL_PROMPT=0).
 
 ## Layout
 - `src/` — Rust CLI: main.rs (clap dispatch), chunker.rs, store.rs, manifest.rs

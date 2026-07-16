@@ -1,8 +1,8 @@
-//! git-storage: milestone-0 walking skeleton.
+//! git-storage: milestone-1 walking skeleton.
 //!
-//! Stores files in a local git repository as fixed-size, content-addressed
-//! chunks. See DESIGN.md for the target architecture and IMPLEMENTATION-PLAN.md
-//! for what replaces each naive piece here.
+//! Stores files in a local git repository as content-defined (FastCDC),
+//! content-addressed chunks. See DESIGN.md for the target architecture and
+//! IMPLEMENTATION-PLAN.md for what replaces each remaining naive piece.
 
 mod chunker;
 mod manifest;
@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use chunker::DEFAULT_CHUNK_SIZE;
 use manifest::{ChunkRef, Manifest};
 use store::Store;
 
@@ -23,7 +22,7 @@ use store::Store;
 #[command(
     name = "git-storage",
     version,
-    about = "Store files in a git repo as content-addressed chunks (milestone 0)"
+    about = "Store files in a git repo as content-addressed, content-defined chunks (milestone 1)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,9 +38,11 @@ enum Cmd {
         /// Store repository directory (created and `git init`ed if missing).
         #[arg(long)]
         repo: PathBuf,
-        /// Chunk size: bytes or with k/m suffix (e.g. "512k", "1m"). Default 1 MiB.
-        #[arg(long, value_parser = chunker::parse_chunk_size, default_value_t = DEFAULT_CHUNK_SIZE)]
-        chunk_size: usize,
+        /// Target AVERAGE chunk size: bytes or k/m suffix (e.g. "512k", "1m").
+        /// Pinned into the store on first put (default 1 MiB); later puts must
+        /// match or omit it.
+        #[arg(long, value_parser = chunker::parse_chunk_size)]
+        chunk_size: Option<usize>,
     },
     /// Reconstruct a stored file, verifying every chunk and the whole file.
     Get {
@@ -72,13 +73,14 @@ fn main() -> Result<()> {
     }
 }
 
-fn put(path: &Path, repo: &Path, chunk_size: usize) -> Result<()> {
+fn put(path: &Path, repo: &Path, chunk_size: Option<usize>) -> Result<()> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .with_context(|| format!("input path {} has no usable file name", path.display()))?
         .to_string();
     let store = Store::open(repo)?;
+    let config = store.config_or_init(chunk_size)?;
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
 
@@ -87,7 +89,7 @@ fn put(path: &Path, repo: &Path, chunk_size: usize) -> Result<()> {
     let mut new_bytes = 0u64;
     let mut total_size = 0u64;
 
-    let file_hash = chunker::stream_chunks(reader, chunk_size, |chunk| {
+    let file_hash = chunker::stream_chunks(reader, &config.chunker, |chunk| {
         total_size += chunk.data.len() as u64;
         if store.put_object(&chunk.hash, &chunk.data)? {
             new_chunks += 1;
@@ -104,7 +106,7 @@ fn put(path: &Path, repo: &Path, chunk_size: usize) -> Result<()> {
     let manifest = Manifest {
         name: name.clone(),
         size: total_size,
-        chunk_size: chunk_size as u64,
+        avg_chunk_size: config.chunker.avg_size as u64,
         file_hash,
         chunks,
     };

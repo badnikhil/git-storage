@@ -26,8 +26,9 @@ pub struct Manifest {
     pub name: String,
     /// Total file size in bytes.
     pub size: u64,
-    /// Chunk size used at `put` time (fixed-size in milestone 0).
-    pub chunk_size: u64,
+    /// Target average chunk size (content-defined chunking; actual chunk
+    /// sizes vary between the store's min and max).
+    pub avg_chunk_size: u64,
     /// BLAKE3 (hex) of the whole file, verified end-to-end on `get`.
     pub file_hash: String,
     /// Ordered chunk list; concatenating these reconstructs the file.
@@ -56,7 +57,7 @@ mod tests {
         let m = Manifest {
             name: "example.bin".into(),
             size: 1234,
-            chunk_size: 1024,
+            avg_chunk_size: 1024,
             file_hash: "f".repeat(64),
             chunks: vec![
                 ChunkRef {
