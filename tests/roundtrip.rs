@@ -1,6 +1,6 @@
-//! Integration tests: M0 exit criteria (roundtrip, dedup, corruption) plus
-//! M1 exit criteria (insert-in-middle dedup, per-store boundary divergence,
-//! pinned chunk-size enforcement).
+//! Integration tests: M0 (roundtrip, dedup, corruption) + M1 (insert-in-middle
+//! dedup, per-store divergence, pinned chunk size) + M2 (encryption: dedup
+//! survives sealing, backend opacity, wrong/missing key, tamper detection).
 //!
 //! GIT ISOLATION: every CLI invocation runs with the user's git configuration
 //! blanked out (GIT_CONFIG_GLOBAL/SYSTEM pointed at /dev/null, HOME at the
@@ -9,7 +9,7 @@
 //! (the CLI has no network git operations).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
@@ -63,13 +63,39 @@ impl StoreFixture {
     fn home(&self) -> &Path {
         self.tmp.path()
     }
-    fn repo(&self) -> std::path::PathBuf {
+    fn repo(&self) -> PathBuf {
         self.tmp.path().join("store")
     }
-    fn file(&self, name: &str, data: &[u8]) -> std::path::PathBuf {
+    fn keyfile(&self) -> PathBuf {
+        self.tmp.path().join("master.key")
+    }
+    fn file(&self, name: &str, data: &[u8]) -> PathBuf {
         let p = self.tmp.path().join(name);
         fs::write(&p, data).unwrap();
         p
+    }
+    fn put(&self, input: &Path, extra: &[&str]) -> Output {
+        run_ok(
+            bin(self.home())
+                .args(["put"])
+                .arg(input)
+                .args(["--repo"])
+                .arg(self.repo())
+                .args(["--keyfile"])
+                .arg(self.keyfile())
+                .args(extra),
+        )
+    }
+    fn get(&self, name: &str, output: &Path) -> Output {
+        run_ok(
+            bin(self.home())
+                .args(["get", name, "--output"])
+                .arg(output)
+                .args(["--repo"])
+                .arg(self.repo())
+                .args(["--keyfile"])
+                .arg(self.keyfile()),
+        )
     }
 }
 
@@ -80,21 +106,8 @@ fn roundtrip_is_byte_identical() {
     let input = fx.file("input.bin", &data);
     let output = fx.tmp.path().join("restored.bin");
 
-    run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&input)
-            .args(["--repo"])
-            .arg(fx.repo())
-            .args(["--chunk-size", "256k"]),
-    );
-    run_ok(
-        bin(fx.home())
-            .args(["get", "input.bin", "--output"])
-            .arg(&output)
-            .args(["--repo"])
-            .arg(fx.repo()),
-    );
+    fx.put(&input, &["--chunk-size", "256k"]);
+    fx.get("input.bin", &output);
 
     assert_eq!(
         data,
@@ -103,31 +116,20 @@ fn roundtrip_is_byte_identical() {
     );
 }
 
+/// M2 exit criterion 1: dedup survives encryption — identical plaintext,
+/// same store → 0 new chunks.
 #[test]
-fn second_put_dedups_everything() {
+fn second_put_dedups_everything_through_encryption() {
     let fx = StoreFixture::new();
     let input = fx.file("input.bin", &varied_bytes(1024 * 1024, 0x1234));
 
-    run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&input)
-            .args(["--repo"])
-            .arg(fx.repo())
-            .args(["--chunk-size", "256k"]),
-    );
-    let second = run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&input)
-            .args(["--repo"])
-            .arg(fx.repo()),
-    );
+    fx.put(&input, &["--chunk-size", "256k"]);
+    let second = fx.put(&input, &[]);
 
     let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(
         stdout.contains("0 new"),
-        "second identical put must report 0 new chunks, got: {stdout}"
+        "second identical put must report 0 new chunks (deterministic encryption), got: {stdout}"
     );
     assert!(
         stdout.contains("no changes"),
@@ -141,14 +143,7 @@ fn corrupted_object_fails_get_loudly() {
     let input = fx.file("input.bin", &varied_bytes(600 * 1024, 0x77));
     let output = fx.tmp.path().join("restored.bin");
 
-    run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&input)
-            .args(["--repo"])
-            .arg(fx.repo())
-            .args(["--chunk-size", "64k"]),
-    );
+    fx.put(&input, &["--chunk-size", "64k"]);
 
     // Flip one byte in the first chunk object found.
     let object = find_first_object(&fx.repo().join("objects"));
@@ -162,6 +157,8 @@ fn corrupted_object_fails_get_loudly() {
         .arg(&output)
         .args(["--repo"])
         .arg(fx.repo())
+        .args(["--keyfile"])
+        .arg(fx.keyfile())
         .output()
         .expect("spawning git-storage");
     assert!(!out.status.success(), "get must fail on corrupted object");
@@ -172,9 +169,8 @@ fn corrupted_object_fails_get_loudly() {
     );
 }
 
-/// M1 exit criterion 1: after a mid-file insert, most chunks must dedup
-/// against the original version. Fixed-size chunking dedups nothing past the
-/// edit point; FastCDC re-synchronizes.
+/// M1 exit criterion 1 (still holding under encryption): after a mid-file
+/// insert, most chunks must dedup against the original version.
 #[test]
 fn insert_in_middle_mostly_dedups() {
     let fx = StoreFixture::new();
@@ -183,27 +179,12 @@ fn insert_in_middle_mostly_dedups() {
     edited.splice(8 * 1024 * 1024..8 * 1024 * 1024, [0xAAu8; 1024]);
 
     let orig_file = fx.file("data.bin", &original);
-    run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&orig_file)
-            .args(["--repo"])
-            .arg(fx.repo())
-            .args(["--chunk-size", "256k"]),
-    );
+    fx.put(&orig_file, &["--chunk-size", "256k"]);
 
-    // Re-put under the same name after the edit; count dedup from the output.
     fs::write(&orig_file, &edited).unwrap();
-    let out = run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&orig_file)
-            .args(["--repo"])
-            .arg(fx.repo()),
-    );
+    let out = fx.put(&orig_file, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    // "data.bin: <total> chunks, <new> new, <deduped> deduped, ..."
     let (total, new) = parse_counts(&stdout);
     let deduped = total - new;
     assert!(
@@ -211,44 +192,123 @@ fn insert_in_middle_mostly_dedups() {
         "expected >=80% chunk dedup after 1 KiB mid-file insert in 16 MiB, got {deduped}/{total}\noutput: {stdout}"
     );
 
-    // And the edited file must still roundtrip.
     let restored = fx.tmp.path().join("restored.bin");
-    run_ok(
-        bin(fx.home())
-            .args(["get", "data.bin", "--output"])
-            .arg(&restored)
-            .args(["--repo"])
-            .arg(fx.repo()),
-    );
+    fx.get("data.bin", &restored);
     assert_eq!(edited, fs::read(&restored).unwrap());
 }
 
-/// M1 exit criterion 2: two stores (different gear seeds) chunk the same file
-/// differently — the anti-fingerprinting property.
+/// M1/M2: two stores with different master keys chunk AND encrypt differently
+/// — no shared boundaries, no shared ciphertext.
 #[test]
-fn different_stores_produce_different_boundaries() {
+fn different_stores_share_nothing() {
     let fx = StoreFixture::new();
     let data = varied_bytes(4 * 1024 * 1024, 0xCAFE);
     let input = fx.file("input.bin", &data);
-    let repo_a = fx.tmp.path().join("store-a");
-    let repo_b = fx.tmp.path().join("store-b");
 
-    for repo in [&repo_a, &repo_b] {
+    let mut object_sets = Vec::new();
+    for label in ["a", "b"] {
+        let repo = fx.tmp.path().join(format!("store-{label}"));
+        let keyfile = fx.tmp.path().join(format!("master-{label}.key"));
         run_ok(
             bin(fx.home())
                 .args(["put"])
                 .arg(&input)
                 .args(["--repo"])
-                .arg(repo)
+                .arg(&repo)
+                .args(["--keyfile"])
+                .arg(&keyfile)
                 .args(["--chunk-size", "256k"]),
         );
+        object_sets.push(object_names(&repo.join("objects")));
     }
 
-    let hashes_a = object_names(&repo_a.join("objects"));
-    let hashes_b = object_names(&repo_b.join("objects"));
-    assert_ne!(
-        hashes_a, hashes_b,
-        "two stores with independent gear seeds must not produce identical chunk sets"
+    assert!(
+        object_sets[0].is_disjoint(&object_sets[1]),
+        "two stores with different master keys must share zero chunk IDs"
+    );
+}
+
+/// M2 exit criterion 3: backend opacity — nothing plaintext-derived is
+/// readable anywhere in the store repo.
+#[test]
+fn store_repo_contains_no_plaintext() {
+    let fx = StoreFixture::new();
+    // Highly recognizable plaintext, repeated so zstd would love it.
+    let needle = b"TOP-SECRET-NEEDLE-0xDEADBEEF";
+    let data: Vec<u8> = needle.repeat(200_000); // ~5.4 MiB
+    let input = fx.file("secrets.txt", &data);
+    fx.put(&input, &["--chunk-size", "256k"]);
+
+    // Scan every file in the store repo (including .git) for the needle and
+    // for the logical file name.
+    let mut scanned = 0;
+    for path in walk(&fx.repo()) {
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            find_subslice(&bytes, needle).is_none(),
+            "plaintext needle found in {}",
+            path.display()
+        );
+        if path.file_name().is_some_and(|n| n != "config.json") {
+            assert!(
+                find_subslice(&bytes, b"secrets.txt").is_none(),
+                "file name leaked in {}",
+                path.display()
+            );
+        }
+        scanned += 1;
+    }
+    assert!(scanned > 5, "expected to scan several files, got {scanned}");
+}
+
+/// M2 exit criterion: wrong key must fail loudly, not produce garbage.
+#[test]
+fn wrong_key_fails_cleanly() {
+    let fx = StoreFixture::new();
+    let input = fx.file("input.bin", &varied_bytes(512 * 1024, 0x5EED));
+    fx.put(&input, &["--chunk-size", "256k"]);
+
+    // Attempt get with a DIFFERENT keyfile.
+    let wrong_key = fx.tmp.path().join("wrong.key");
+    fs::write(&wrong_key, format!("{}\n", "ab".repeat(32))).unwrap();
+    let out = bin(fx.home())
+        .args(["get", "input.bin", "--output"])
+        .arg(fx.tmp.path().join("out.bin"))
+        .args(["--repo"])
+        .arg(fx.repo())
+        .args(["--keyfile"])
+        .arg(&wrong_key)
+        .output()
+        .expect("spawning git-storage");
+    assert!(!out.status.success(), "wrong key must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("authentication failed") || stderr.contains("no manifest"),
+        "wrong-key failure must be an auth/lookup error, got: {stderr}"
+    );
+}
+
+/// M2: a missing keyfile on an EXISTING store must refuse (not regenerate and
+/// silently orphan the data).
+#[test]
+fn missing_keyfile_on_existing_store_is_refused() {
+    let fx = StoreFixture::new();
+    let input = fx.file("input.bin", &varied_bytes(128 * 1024, 0xF00D));
+    fx.put(&input, &["--chunk-size", "64k"]);
+
+    fs::remove_file(fx.keyfile()).unwrap();
+    let out = bin(fx.home())
+        .args(["ls", "--repo"])
+        .arg(fx.repo())
+        .args(["--keyfile"])
+        .arg(fx.keyfile())
+        .output()
+        .expect("spawning git-storage");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("keyfile") && stderr.contains("not found"),
+        "must explain the keyfile is missing, got: {stderr}"
     );
 }
 
@@ -259,19 +319,14 @@ fn conflicting_chunk_size_is_refused() {
     let fx = StoreFixture::new();
     let input = fx.file("input.bin", &varied_bytes(512 * 1024, 0x5EED));
 
-    run_ok(
-        bin(fx.home())
-            .args(["put"])
-            .arg(&input)
-            .args(["--repo"])
-            .arg(fx.repo())
-            .args(["--chunk-size", "256k"]),
-    );
+    fx.put(&input, &["--chunk-size", "256k"]);
     let out = bin(fx.home())
         .args(["put"])
         .arg(&input)
         .args(["--repo"])
         .arg(fx.repo())
+        .args(["--keyfile"])
+        .arg(fx.keyfile())
         .args(["--chunk-size", "512k"])
         .output()
         .expect("spawning git-storage");
@@ -285,6 +340,8 @@ fn conflicting_chunk_size_is_refused() {
         "error should explain the store is pinned, got: {stderr}"
     );
 }
+
+// ---------- helpers ----------
 
 fn parse_counts(stdout: &str) -> (usize, usize) {
     // "<name>: <total> chunks, <new> new, ..."
@@ -311,7 +368,7 @@ fn object_names(objects_dir: &Path) -> std::collections::BTreeSet<String> {
     names
 }
 
-fn find_first_object(objects_dir: &Path) -> std::path::PathBuf {
+fn find_first_object(objects_dir: &Path) -> PathBuf {
     for prefix in fs::read_dir(objects_dir).unwrap() {
         let prefix = prefix.unwrap().path();
         if prefix.is_dir() {
@@ -321,4 +378,24 @@ fn find_first_object(objects_dir: &Path) -> std::path::PathBuf {
         }
     }
     panic!("no chunk objects found in {}", objects_dir.display());
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

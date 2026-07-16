@@ -29,34 +29,33 @@ pub const MIN_AVG_SIZE: usize = 1024;
 pub const MAX_AVG_SIZE: usize = 16 * 1024 * 1024;
 /// Default average chunk size: 1 MiB (DESIGN.md Section 5.2).
 pub const DEFAULT_AVG_SIZE: usize = 1024 * 1024;
+/// Absolute upper bound on any chunk's plaintext size (max avg * 4). Used as
+/// the decompression allocation cap on the read path.
+pub const ABS_MAX_CHUNK: usize = MAX_AVG_SIZE * 4;
 
-/// FastCDC parameters, pinned per store: a store MUST chunk identically for
-/// its whole lifetime or dedup breaks (see StoreConfig).
+/// FastCDC size parameters, pinned per store: a store MUST chunk identically
+/// for its whole lifetime or dedup breaks (see StoreConfig).
+///
+/// MILESTONE 2 change: the gear seed is no longer stored here (or anywhere on
+/// disk) — it is derived from the master key (crypto::Keys::gear_seed, per
+/// DESIGN.md Section 5.4), so the config file leaks nothing about boundaries.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkerParams {
     pub min_size: usize,
     pub avg_size: usize,
     pub max_size: usize,
-    /// Seed for the gear table, hex-encoded u64.
-    pub gear_seed: String,
 }
 
 impl ChunkerParams {
     /// Derive min/max from an average using the conventional FastCDC ratios
-    /// (min = avg/2, max = avg*4) and a fresh random gear seed.
-    pub fn from_avg(avg: usize, gear_seed: u64) -> Result<Self> {
+    /// (min = avg/2, max = avg*4).
+    pub fn from_avg(avg: usize) -> Result<Self> {
         validate_avg_size(avg)?;
         Ok(Self {
             min_size: avg / 2,
             avg_size: avg,
             max_size: avg * 4,
-            gear_seed: format!("{gear_seed:016x}"),
         })
-    }
-
-    fn seed(&self) -> Result<u64> {
-        u64::from_str_radix(&self.gear_seed, 16)
-            .with_context(|| format!("invalid gear_seed in store config: {:?}", self.gear_seed))
     }
 }
 
@@ -92,9 +91,9 @@ fn validate_avg_size(bytes: usize) -> Result<()> {
     Ok(())
 }
 
-/// One produced chunk: its content and BLAKE3 hash (hex).
+/// One produced chunk: a plaintext slice of the input stream. Hashing,
+/// compression, and encryption happen downstream (crypto.rs).
 pub struct Chunk {
-    pub hash: String,
     pub data: Vec<u8>,
 }
 
@@ -135,10 +134,10 @@ struct FastCdc {
 }
 
 impl FastCdc {
-    fn new(params: &ChunkerParams) -> Result<Self> {
+    fn new(params: &ChunkerParams, gear_seed: u64) -> Result<Self> {
         let bits = (params.avg_size as f64).log2().round() as u32;
         Ok(Self {
-            gear: gear_table(params.seed()?),
+            gear: gear_table(gear_seed),
             min_size: params.min_size,
             avg_size: params.avg_size,
             max_size: params.max_size,
@@ -180,12 +179,17 @@ impl FastCdc {
 ///
 /// Memory bound: at most `max_size` bytes buffered at once — the whole file is
 /// never resident.
-pub fn stream_chunks<R, F>(mut reader: R, params: &ChunkerParams, mut on_chunk: F) -> Result<String>
+pub fn stream_chunks<R, F>(
+    mut reader: R,
+    params: &ChunkerParams,
+    gear_seed: u64,
+    mut on_chunk: F,
+) -> Result<String>
 where
     R: Read,
     F: FnMut(Chunk) -> Result<()>,
 {
-    let cdc = FastCdc::new(params)?;
+    let cdc = FastCdc::new(params, gear_seed)?;
     let mut file_hasher = blake3::Hasher::new();
     let mut buf: Vec<u8> = Vec::with_capacity(cdc.max_size);
     let mut read_buf = vec![0u8; 64 * 1024];
@@ -207,8 +211,7 @@ where
         }
         let end = cdc.cut(&buf);
         let data = buf[..end].to_vec();
-        let hash = blake3::hash(&data).to_hex().to_string();
-        on_chunk(Chunk { hash, data })?;
+        on_chunk(Chunk { data })?;
         buf.drain(..end);
     }
 
@@ -231,8 +234,8 @@ pub fn write_and_hash<W: Write>(
 mod tests {
     use super::*;
 
-    fn params(avg: usize, seed: u64) -> ChunkerParams {
-        ChunkerParams::from_avg(avg, seed).unwrap()
+    fn params(avg: usize) -> ChunkerParams {
+        ChunkerParams::from_avg(avg).unwrap()
     }
 
     /// Deterministic varied bytes (xorshift) for boundary tests.
@@ -248,9 +251,9 @@ mod tests {
         out
     }
 
-    fn boundaries(data: &[u8], p: &ChunkerParams) -> Vec<usize> {
+    fn boundaries(data: &[u8], p: &ChunkerParams, seed: u64) -> Vec<usize> {
         let mut lens = Vec::new();
-        stream_chunks(data, p, |c| {
+        stream_chunks(data, p, seed, |c| {
             lens.push(c.data.len());
             Ok(())
         })
@@ -270,9 +273,9 @@ mod tests {
 
     #[test]
     fn chunks_respect_min_max_and_cover_all_bytes() {
-        let p = params(4096, 42);
+        let p = params(4096);
         let data = varied(256 * 1024, 7);
-        let lens = boundaries(&data, &p);
+        let lens = boundaries(&data, &p, 42);
         let total: usize = lens.iter().sum();
         assert_eq!(total, data.len(), "chunks must cover every byte");
         // Every chunk except the last obeys min/max.
@@ -287,41 +290,41 @@ mod tests {
 
     #[test]
     fn empty_input_yields_no_chunks() {
-        let p = params(4096, 42);
-        let lens = boundaries(&[], &p);
+        let p = params(4096);
+        let lens = boundaries(&[], &p, 42);
         assert!(lens.is_empty());
     }
 
     #[test]
     fn chunking_is_deterministic_for_same_seed() {
-        let p = params(4096, 1234);
+        let p = params(4096);
         let data = varied(128 * 1024, 99);
-        assert_eq!(boundaries(&data, &p), boundaries(&data, &p));
+        assert_eq!(boundaries(&data, &p, 1234), boundaries(&data, &p, 1234));
     }
 
     #[test]
     fn different_seeds_give_different_boundaries() {
-        let a = params(4096, 1);
-        let b = params(4096, 2);
+        let p = params(4096);
         let data = varied(256 * 1024, 99);
         assert_ne!(
-            boundaries(&data, &a),
-            boundaries(&data, &b),
+            boundaries(&data, &p, 1),
+            boundaries(&data, &p, 2),
             "different gear seeds must produce different chunk boundaries"
         );
     }
 
     #[test]
     fn insert_in_middle_preserves_most_chunks() {
-        let p = params(4096, 77);
+        let p = params(4096);
+        let seed = 77u64;
         let original = varied(512 * 1024, 5);
         let mut edited = original.clone();
         let mid = edited.len() / 2;
         edited.splice(mid..mid, [0xAAu8; 100]);
 
         let mut orig_hashes = std::collections::HashSet::new();
-        stream_chunks(&original[..], &p, |c| {
-            orig_hashes.insert(c.hash);
+        stream_chunks(&original[..], &p, seed, |c| {
+            orig_hashes.insert(blake3::hash(&c.data).to_hex().to_string());
             Ok(())
         })
         .unwrap();
@@ -330,10 +333,10 @@ mod tests {
         let mut reused_bytes = 0usize;
         let mut total = 0usize;
         let mut total_bytes = 0usize;
-        stream_chunks(&edited[..], &p, |c| {
+        stream_chunks(&edited[..], &p, seed, |c| {
             total += 1;
             total_bytes += c.data.len();
-            if orig_hashes.contains(&c.hash) {
+            if orig_hashes.contains(&blake3::hash(&c.data).to_hex().to_string()) {
                 reused += 1;
                 reused_bytes += c.data.len();
             }

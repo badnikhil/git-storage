@@ -377,6 +377,16 @@ store (no recovery by design — the backend sees only ciphertext). Master-key
 storage/rotation is a control-plane concern (Section 16); rotation is future work because
 convergent chunk keys (Section 6.3) are content-derived and re-keying implies rewriting.
 
+> **Implementation delta (M2, 2026-07-16).** The implementation realizes the
+> PRF/KDF roles above with BLAKE3 primitives instead of HMAC-SHA2/HKDF:
+> `chunk_key = BLAKE3-keyed(derive(master, ctx_chunk), H(plaintext))`, and all
+> purpose keys via `BLAKE3 derive_key` with unique context strings. Same
+> construction family (keyed PRF; purpose-bound KDF), one hash primitive
+> system-wide, fewer dependencies. The implementation also adds a keyed **name
+> tag** (`BLAKE3-keyed(derive(master, ctx_name), file_name)`) used as the
+> manifest's on-disk filename so logical names never appear in cleartext, and
+> generic commit messages so names do not leak via git history either.
+
 ### 6.3 Keyed convergent encryption
 
 Per-chunk keys are **keyed-convergent**:
