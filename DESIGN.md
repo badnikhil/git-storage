@@ -713,6 +713,16 @@ Caveat (documented): promisor fetch requires the client to be online and the
 promisor remote reachable.[^partial-clone] Behavior on non-GitHub backends
 (Gitea/Forgejo) is **unverified** and must be tested (Section 18 open-problem 3).
 
+> **Implementation delta (M4, 2026-07-16).** `RemoteBackend::read_blob_at`
+> implements exactly this path: (1) local-mirror hit; (2) blobless fetch of the
+> segment tree (`--filter=blob:none`), local walk of `<aa>/<bb>/<chunk_id>` to the
+> git blob OID (`tree_entry_oid`), then a demand fetch of that single blob by OID;
+> (3) fallback to a full segment fetch. A runtime **capability probe** caches the
+> per-backend verdict and is **observable** via `promisor_supported()` and the
+> `stats` command's read-path note; `GITSTORAGE_FORCE_FULL_FETCH=1` forces the
+> fallback. The probe + fallback are exercised over `file://` in
+> `tests/backend.rs`; the live Gitea verdict remains open (Section 18 open-problem 3).
+
 ### 10.4 Fallback: Git Data Blobs API
 
 If partial clone is unavailable on a backend, the client MAY fetch a chunk via the
@@ -982,6 +992,23 @@ The strict data/control separation is what keeps the design inside the API rate
 limits: the high-volume path (data) never touches the API, and the API path (control)
 is low-volume by construction.
 
+> **Implementation delta (M4, 2026-07-16).** The M4 backend layer realizes this
+> split concretely and adds one refinement: **init-time provisioning**. The CLI
+> `init` command MAY authenticate once (via `GITSTORAGE_TOKEN`) and CREATE the
+> declared fixed volume set through the control-plane REST API — GitHub
+> `POST /user/repos {private:true}` and Gitea's equivalent under
+> `<web_base>/api/v1` — living in `src/backend/provision.rs`. Provisioning is
+> **idempotent-safe**: an existing *empty* repo is adopted, an existing
+> *non-empty* foreign repo makes `init` fail loudly rather than clobber it.
+> Crucially, the **data-plane adapter (`RemoteBackend`) has no repo-creation
+> capability whatsoever** — repo creation is reachable only from `init`, only via
+> the control-plane module. This preserves the §16 invariant (data plane = git
+> protocol only) while giving `init` a one-shot, operator-driven way to stand up
+> the fixed budget of volumes. Provisioning shells out to `curl` (token passed as
+> an `Authorization` header, never written to disk) to avoid adding an async
+> HTTP/TLS dependency. `file://` inits create bare repos directly; `ssh://`
+> volumes are assumed pre-provisioned.
+
 ---
 
 ## 17. Failure and abuse-signature avoidance
@@ -1033,6 +1060,14 @@ These are genuinely unresolved in v1 and are called out for future work.
    unverified.** GitHub.com partial clone is verified.[^partial-clone] Gitea/Forgejo
    promisor-remote blob-on-demand behavior is **unverified** and must be tested; the
    read path's primary miss strategy (Section 10.3) may need a backend-specific fallback.
+   **M4 status (2026-07-16):** the *mechanism* is implemented and passing over
+   `file://` — blobless tree fetch, chunk-id→OID resolution, blob-by-OID demand
+   fetch, a cached capability probe, and an automatic full-segment fallback
+   (`RemoteBackend::read_blob_at`, exercised by `tests/backend.rs`). The **live
+   Gitea verdict is still pending** (no Gitea instance was available during M4);
+   run the env-gated `gitea_live_roundtrip` test against a real instance to close
+   this. The fallback means a negative Gitea verdict degrades performance, not
+   correctness.
 
 4. **Raw byte-range request support is unverified.** Whether any backend's raw
    endpoint honors HTTP `Range:`/206 is **unverified**[^raw-behavior]; this

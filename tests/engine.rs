@@ -57,13 +57,46 @@ fn varied_bytes(len: usize, mut state: u64) -> Vec<u8> {
 
 struct Fx {
     tmp: TempDir,
+    /// When true, the store is backed by file:// remotes (RemoteBackend),
+    /// initialized via `git-storage init`. When false, it's a plain
+    /// M3-back-compat local store (LocalBackend). The SAME test bodies run in
+    /// both modes so the engine is proven identical across the trait boundary.
+    remote: bool,
 }
 
 impl Fx {
     fn new() -> Self {
-        Self {
+        Self::with_mode(false)
+    }
+    fn new_remote() -> Self {
+        Self::with_mode(true)
+    }
+    fn with_mode(remote: bool) -> Self {
+        let fx = Self {
             tmp: TempDir::new().unwrap(),
+            remote,
+        };
+        if remote {
+            fx.init_remote();
         }
+        fx
+    }
+    /// Initialize a remote-backed store (one file:// volume + file:// index).
+    fn init_remote(&self) {
+        let remotes = self.tmp.path().join("remotes");
+        fs::create_dir_all(&remotes).unwrap();
+        let v0 = format!("file://{}", remotes.join("v0.git").display());
+        let idx = format!("file://{}", remotes.join("index.git").display());
+        run_ok(
+            bin(self.home())
+                .args(["init", "--repo"])
+                .arg(self.repo())
+                .args(["--keyfile"])
+                .arg(self.keyfile())
+                .args(["--volume", &format!("v0={v0}")])
+                .args(["--index-url", &idx])
+                .args(["--chunk-size", "64k"]),
+        );
     }
     fn home(&self) -> &Path {
         self.tmp.path()
@@ -73,6 +106,23 @@ impl Fx {
     }
     fn keyfile(&self) -> PathBuf {
         self.tmp.path().join("master.key")
+    }
+    /// Path to the bare repo holding segments (mirror in remote mode, the real
+    /// volume in local mode — same relative path either way).
+    fn volume_git(&self) -> PathBuf {
+        if self.remote {
+            self.tmp.path().join("remotes/v0.git")
+        } else {
+            self.repo().join("volumes/v0.git")
+        }
+    }
+    /// Path to the bare repo holding the log (the remote index in remote mode).
+    fn index_git(&self) -> PathBuf {
+        if self.remote {
+            self.tmp.path().join("remotes/index.git")
+        } else {
+            self.repo().join("index.git")
+        }
     }
     fn file(&self, name: &str, data: &[u8]) -> PathBuf {
         let p = self.tmp.path().join(name);
@@ -130,7 +180,7 @@ impl Fx {
     fn segment_refs(&self) -> Vec<String> {
         let out = Command::new("git")
             .arg("--git-dir")
-            .arg(self.repo().join("volumes/v0.git"))
+            .arg(self.volume_git())
             .args(["for-each-ref", "--format=%(refname)", "refs/segments/"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -144,7 +194,7 @@ impl Fx {
     fn log_tip(&self) -> Option<String> {
         let out = Command::new("git")
             .arg("--git-dir")
-            .arg(self.repo().join("index.git"))
+            .arg(self.index_git())
             .args(["rev-parse", "--verify", "--quiet", "refs/heads/log"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -159,12 +209,15 @@ impl Fx {
 }
 
 // ---------- crash matrix (DESIGN.md Section 11) ----------
+//
+// M4: each crash-matrix and concurrency test body is parameterized over the
+// backend (`Fx::new` = LocalBackend, `Fx::new_remote` = RemoteBackend over
+// file://). The SAME body runs in both modes, demonstrating the engine is
+// identical across the trait boundary — the M4 exit criterion.
 
 /// C1: crash after chunk blobs are written but before the segment ref exists.
 /// Blobs are unreachable; the log is untouched; a redo succeeds cleanly.
-#[test]
-fn crash_c1_before_segment_leaves_store_consistent() {
-    let fx = Fx::new();
+fn body_crash_c1(fx: &Fx) {
     let input = fx.file("a.bin", &varied_bytes(300 * 1024, 1));
 
     fx.crashing_put(&input, "before-segment");
@@ -181,12 +234,20 @@ fn crash_c1_before_segment_leaves_store_consistent() {
     assert_eq!(fs::read(&input).unwrap(), fs::read(&restored).unwrap());
 }
 
+#[test]
+fn crash_c1_before_segment_leaves_store_consistent() {
+    body_crash_c1(&Fx::new());
+}
+
+#[test]
+fn crash_c1_before_segment_leaves_store_consistent_remote() {
+    body_crash_c1(&Fx::new_remote());
+}
+
 /// C2: crash after the segment ref lands but before the log CAS. The segment
 /// is an invisible orphan: readers see nothing, redo succeeds, and the
 /// orphan's chunks get REUSED by the redo (content addressing at work).
-#[test]
-fn crash_c2_orphan_segment_is_invisible_and_redo_reuses_chunks() {
-    let fx = Fx::new();
+fn body_crash_c2(fx: &Fx) {
     let input = fx.file("a.bin", &varied_bytes(300 * 1024, 2));
 
     fx.crashing_put(&input, "after-segment");
@@ -204,11 +265,19 @@ fn crash_c2_orphan_segment_is_invisible_and_redo_reuses_chunks() {
     assert_eq!(fs::read(&input).unwrap(), fs::read(&restored).unwrap());
 }
 
+#[test]
+fn crash_c2_orphan_segment_is_invisible_and_redo_reuses_chunks() {
+    body_crash_c2(&Fx::new());
+}
+
+#[test]
+fn crash_c2_orphan_segment_is_invisible_and_redo_reuses_chunks_remote() {
+    body_crash_c2(&Fx::new_remote());
+}
+
 /// C3 boundary: crash after the transaction commit object is built but before
 /// the CAS is issued. The log ref must be exactly its old value.
-#[test]
-fn crash_c3_before_cas_log_is_old_value() {
-    let fx = Fx::new();
+fn body_crash_c3(fx: &Fx) {
     // First, one successful put so the log has a known tip.
     let base = fx.file("base.bin", &varied_bytes(100 * 1024, 3));
     run_ok(&mut fx.put_cmd(&base));
@@ -232,11 +301,19 @@ fn crash_c3_before_cas_log_is_old_value() {
     assert!(fx.ls_stdout().contains("b.bin"));
 }
 
+#[test]
+fn crash_c3_before_cas_log_is_old_value() {
+    body_crash_c3(&Fx::new());
+}
+
+#[test]
+fn crash_c3_before_cas_log_is_old_value_remote() {
+    body_crash_c3(&Fx::new_remote());
+}
+
 /// C4: crash immediately after a successful CAS. The transaction is durable;
 /// a fresh process sees the file and reads it back verified.
-#[test]
-fn crash_c4_after_cas_transaction_is_durable() {
-    let fx = Fx::new();
+fn body_crash_c4(fx: &Fx) {
     let input = fx.file("a.bin", &varied_bytes(300 * 1024, 5));
 
     fx.crashing_put(&input, "after-cas");
@@ -256,11 +333,29 @@ fn crash_c4_after_cas_transaction_is_durable() {
     );
 }
 
+#[test]
+fn crash_c4_after_cas_transaction_is_durable() {
+    body_crash_c4(&Fx::new());
+}
+
+#[test]
+fn crash_c4_after_cas_transaction_is_durable_remote() {
+    body_crash_c4(&Fx::new_remote());
+}
+
 // ---------- snapshot reads (Section 13.3) ----------
 
 #[test]
 fn pinned_reader_sees_immutable_snapshot() {
-    let fx = Fx::new();
+    body_pinned_reader(&Fx::new());
+}
+
+#[test]
+fn pinned_reader_sees_immutable_snapshot_remote() {
+    body_pinned_reader(&Fx::new_remote());
+}
+
+fn body_pinned_reader(fx: &Fx) {
     let a = fx.file("a.bin", &varied_bytes(100 * 1024, 6));
     run_ok(&mut fx.put_cmd(&a));
     let pinned = fx.log_tip().unwrap();
@@ -305,7 +400,18 @@ fn pinned_reader_sees_immutable_snapshot() {
 /// both files must be present and readable afterwards.
 #[test]
 fn concurrent_writers_never_lose_updates() {
-    let fx = Fx::new();
+    body_concurrent_writers(&Fx::new());
+}
+
+/// CAS-lost-race OVER THE WIRE (M4 exit): two RemoteBackends racing on the same
+/// file:// remote. The push --force-with-lease loser must observe Ok(false),
+/// rebase, retry, and converge — no lost updates end-to-end.
+#[test]
+fn concurrent_writers_never_lose_updates_remote() {
+    body_concurrent_writers(&Fx::new_remote());
+}
+
+fn body_concurrent_writers(fx: &Fx) {
     // Initialize the store (and keyfile) once, serially.
     let init = fx.file("init.bin", &varied_bytes(64 * 1024, 8));
     run_ok(&mut fx.put_cmd(&init));

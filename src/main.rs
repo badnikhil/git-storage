@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use git_storage::backend::provision::{ensure_repo, Host, Provisioned, RepoSpec};
 use git_storage::chunker;
 use git_storage::crypto::{keyfile, Keys};
-use git_storage::engine::Engine;
+use git_storage::engine::{self, Engine, VolumeConfig, DEFAULT_VOLUME_FULL_THRESHOLD};
+use git_storage::gitrepo::Bare;
 
 #[derive(Parser)]
 #[command(
@@ -27,6 +29,40 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Initialize a store with a FIXED, operator-declared volume set (M4).
+    /// Provisions each declared volume: file:// URLs are inited as bare repos
+    /// directly; https:// GitHub/Gitea repos are created via the control-plane
+    /// REST API (requires GITSTORAGE_TOKEN) — and ONLY the declared set, never
+    /// automatically. The data plane can never create repos.
+    Init {
+        /// Store directory (created if missing).
+        #[arg(long)]
+        repo: PathBuf,
+        /// Master keyfile (created if missing for a brand-new store).
+        #[arg(long)]
+        keyfile: PathBuf,
+        /// A declared volume, `id=url`. Repeatable. url may be file://, https://
+        /// (GitHub/Gitea), or ssh://. Example: `--volume v0=file:///srv/v0.git`.
+        #[arg(long = "volume", value_name = "ID=URL")]
+        volumes: Vec<String>,
+        /// URL for the index/log repo (defaults to a local index.git).
+        #[arg(long)]
+        index_url: Option<String>,
+        /// Per-volume full threshold in bytes (default 4 GiB).
+        #[arg(long)]
+        threshold: Option<u64>,
+        /// Min interval between pushes per volume, ms (rate governance).
+        #[arg(long, default_value_t = 0)]
+        push_interval_ms: u64,
+        /// For https:// GitHub/Gitea provisioning: which API to speak.
+        #[arg(long, value_enum, default_value_t = HostArg::Gitea)]
+        host: HostArg,
+        /// Gitea web base URL (e.g. https://gitea.example.com) for API base.
+        #[arg(long)]
+        gitea_base: Option<String>,
+        #[arg(long, value_parser = chunker::parse_chunk_size)]
+        chunk_size: Option<usize>,
+    },
     /// Chunk, compress, encrypt a file into the store; commit atomically.
     Put {
         /// File to store.
@@ -77,10 +113,53 @@ enum Cmd {
         #[arg(long)]
         keyfile: PathBuf,
     },
+    /// Show per-volume usage vs threshold and the read-path/promisor verdict.
+    Stats {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        keyfile: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum HostArg {
+    Github,
+    Gitea,
+}
+
+impl From<HostArg> for Host {
+    fn from(h: HostArg) -> Self {
+        match h {
+            HostArg::Github => Host::GitHub,
+            HostArg::Gitea => Host::Gitea,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Cmd::Init {
+            repo,
+            keyfile,
+            volumes,
+            index_url,
+            threshold,
+            push_interval_ms,
+            host,
+            gitea_base,
+            chunk_size,
+        } => init(InitArgs {
+            repo,
+            keyfile,
+            volumes,
+            index_url,
+            threshold,
+            push_interval_ms,
+            host: host.into(),
+            gitea_base,
+            chunk_size,
+        }),
         Cmd::Put {
             path,
             repo,
@@ -96,6 +175,7 @@ fn main() -> Result<()> {
         } => get(&name, &repo, &keyfile, &output, at.as_deref()),
         Cmd::Ls { repo, keyfile, at } => ls(&repo, &keyfile, at.as_deref()),
         Cmd::Tip { repo, keyfile } => tip(&repo, &keyfile),
+        Cmd::Stats { repo, keyfile } => stats(&repo, &keyfile),
     }
 }
 
@@ -105,6 +185,112 @@ fn open_engine(repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>) -> R
     let store_is_new = !Engine::store_exists(repo);
     let master = keyfile::load_or_create(keyfile_path, store_is_new)?;
     Engine::open(repo, Keys::new(master), chunk_size)
+}
+
+struct InitArgs {
+    repo: PathBuf,
+    keyfile: PathBuf,
+    volumes: Vec<String>,
+    index_url: Option<String>,
+    threshold: Option<u64>,
+    push_interval_ms: u64,
+    host: Host,
+    gitea_base: Option<String>,
+    chunk_size: Option<usize>,
+}
+
+/// Parse `id=url` into (id, url).
+fn parse_volume_arg(s: &str) -> Result<(String, String)> {
+    let (id, url) = s
+        .split_once('=')
+        .with_context(|| format!("--volume must be ID=URL, got {s:?}"))?;
+    if id.is_empty() || url.is_empty() {
+        anyhow::bail!("--volume must be ID=URL with non-empty parts, got {s:?}");
+    }
+    Ok((id.to_string(), url.to_string()))
+}
+
+/// Best-effort owner/name extraction from a hosted repo URL for provisioning.
+/// e.g. https://github.com/owner/name(.git) -> (owner, name).
+fn owner_name_from_url(url: &str) -> Option<(String, String)> {
+    let after_scheme = url.split("://").nth(1)?;
+    let path = after_scheme.split_once('/')?.1; // strip host
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    let (owner, name) = path.rsplit_once('/')?;
+    // owner may itself contain a leading path segment on some hosts; take the
+    // last two path components.
+    let owner = owner.rsplit('/').next().unwrap_or(owner);
+    Some((owner.to_string(), name.to_string()))
+}
+
+/// Provision one volume repo. file:// = init a bare repo directly (data plane
+/// is allowed to create LOCAL repos). https:// = control-plane REST create
+/// (requires GITSTORAGE_TOKEN), gated + idempotent-safe. ssh:// = must exist.
+fn provision_volume(url: &str, host: Host, gitea_base: Option<&str>) -> Result<()> {
+    if let Some(dir) = url.strip_prefix("file://") {
+        Bare::open(Path::new(dir))
+            .with_context(|| format!("initializing local bare repo {dir}"))?;
+        println!("  {url}: local bare repo ready");
+        return Ok(());
+    }
+    if url.starts_with("https://") {
+        let (owner, name) = owner_name_from_url(url)
+            .with_context(|| format!("cannot parse owner/name from {url}"))?;
+        let web_base = gitea_base.map(|s| s.to_string()).unwrap_or_else(|| {
+            url.split_once("://")
+                .map(|(_, r)| {
+                    r.split_once('/')
+                        .map(|(h, _)| format!("https://{h}"))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+        });
+        let spec = RepoSpec {
+            host,
+            owner: owner.clone(),
+            name: name.clone(),
+            web_base,
+        };
+        match ensure_repo(&spec)? {
+            Provisioned::Created => println!("  {url}: created private repo {owner}/{name}"),
+            Provisioned::AdoptedEmpty => {
+                println!("  {url}: adopted existing empty repo {owner}/{name}")
+            }
+        }
+        return Ok(());
+    }
+    // ssh:// or anything else: we do not create it; it must already exist.
+    println!("  {url}: assumed pre-provisioned (no control-plane create for this scheme)");
+    Ok(())
+}
+
+fn init(a: InitArgs) -> Result<()> {
+    if a.volumes.is_empty() {
+        anyhow::bail!("init requires at least one --volume ID=URL");
+    }
+    let threshold = a.threshold.unwrap_or(DEFAULT_VOLUME_FULL_THRESHOLD);
+    let mut vol_configs = Vec::new();
+    println!("provisioning {} volume(s):", a.volumes.len());
+    for v in &a.volumes {
+        let (id, url) = parse_volume_arg(v)?;
+        provision_volume(&url, a.host, a.gitea_base.as_deref())?;
+        vol_configs.push(VolumeConfig {
+            id,
+            url: Some(url),
+            push_interval_ms: a.push_interval_ms,
+            volume_full_threshold: threshold,
+        });
+    }
+    // Provision the index repo too if it's a file:// URL.
+    if let Some(iu) = &a.index_url {
+        provision_volume(iu, a.host, a.gitea_base.as_deref()).context("provisioning index repo")?;
+    }
+
+    engine::init_config_with_volumes(&a.repo, a.chunk_size, vol_configs, a.index_url)?;
+    // Create the keyfile for the new store (0600) if absent.
+    let _ = keyfile::load_or_create(&a.keyfile, true)?;
+    println!("store initialized at {}", a.repo.display());
+    Ok(())
 }
 
 fn put(path: &Path, repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>) -> Result<()> {
@@ -125,7 +311,10 @@ fn put(path: &Path, repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>)
         stats.ciphertext_bytes
     );
     if stats.committed {
-        println!("committed to {}", repo.display());
+        match &stats.volume {
+            Some(v) => println!("committed to {} (segment → volume {v})", repo.display()),
+            None => println!("committed to {}", repo.display()),
+        }
     } else {
         println!("no changes (identical content already stored)");
     }
@@ -167,6 +356,26 @@ fn tip(repo: &Path, keyfile_path: &Path) -> Result<()> {
     match engine.log_tip()? {
         Some(oid) => println!("{oid}"),
         None => println!("(empty log)"),
+    }
+    Ok(())
+}
+
+fn stats(repo: &Path, keyfile_path: &Path) -> Result<()> {
+    let engine = open_engine(repo, keyfile_path, None)?;
+    println!("volumes:");
+    for (id, used, threshold, spare) in engine.volume_usage()? {
+        let tag = if spare { " [spare]" } else { "" };
+        let pct = used.saturating_mul(100) / threshold.max(1);
+        println!("  {id}{tag}: {used} / {threshold} bytes ({pct}% full)");
+    }
+    let notes = engine.read_path_notes();
+    if notes.is_empty() {
+        println!("read path: local (no promisor probe needed)");
+    } else {
+        println!("read path:");
+        for (id, note) in notes {
+            println!("  {id}: {note}");
+        }
     }
     Ok(())
 }

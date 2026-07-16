@@ -189,6 +189,37 @@ impl Bare {
             .with_context(|| format!("reading blob {rev}:{path}"))
     }
 
+    /// Resolve `<rev>:<path>` to the blob's git OID WITHOUT reading its
+    /// contents. This is the local tree walk of the promisor read path
+    /// (DESIGN.md Section 10.3): in a blob-filtered clone trees are present, so
+    /// resolving chunk-id fanout path → blob OID never touches the network.
+    pub fn tree_entry_oid(&self, rev: &str, path: &str) -> Result<String> {
+        let out = self.run(&["rev-parse", "--verify", &format!("{rev}:{path}")], &[])?;
+        Ok(String::from_utf8(out)
+            .context("tree entry oid utf8")?
+            .trim()
+            .to_string())
+    }
+
+    /// Read a blob by its git OID (content-addressed object read). Used after
+    /// a promisor fetch has made the blob local.
+    pub fn read_blob_by_oid(&self, oid: &str) -> Result<Vec<u8>> {
+        self.run(&["cat-file", "blob", oid], &[])
+            .with_context(|| format!("reading blob object {oid}"))
+    }
+
+    /// True if the object named by `oid` is present locally (not a promisor
+    /// placeholder that would require a network fetch).
+    pub fn has_object(&self, oid: &str) -> bool {
+        Self::base_command(&self.dir)
+            .args(["cat-file", "-e", oid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     /// Commits reachable from `tip`, newest first (linear log expected).
     pub fn rev_list(&self, tip: &str) -> Result<Vec<String>> {
         let out = self.run(&["rev-list", tip], &[])?;
@@ -214,6 +245,33 @@ impl Bare {
                 Some((it.next()?.to_string(), it.next()?.to_string()))
             })
             .collect())
+    }
+
+    /// Recursive (path, size) listing of the blobs in a commit's tree.
+    pub fn ls_tree_sizes(&self, rev: &str) -> Result<Vec<(String, u64)>> {
+        let out = self.run(
+            &["ls-tree", "-r", "--format=%(objectsize) %(path)", rev],
+            &[],
+        )?;
+        Ok(String::from_utf8(out)
+            .context("ls-tree utf8")?
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.splitn(2, ' ');
+                let size: u64 = it.next()?.parse().ok()?;
+                Some((it.next()?.to_string(), size))
+            })
+            .collect())
+    }
+
+    /// Committer timestamp (unix seconds) of a commit.
+    pub fn commit_time(&self, rev: &str) -> Result<i64> {
+        let out = self.run(&["show", "-s", "--format=%ct", rev], &[])?;
+        String::from_utf8(out)
+            .context("commit time utf8")?
+            .trim()
+            .parse()
+            .context("parsing commit timestamp")
     }
 
     // ---------- internals ----------
