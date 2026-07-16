@@ -1,34 +1,24 @@
-//! git-storage: milestone-2 walking skeleton.
+//! git-storage CLI: milestone-3 — sealed segments + CAS transaction log.
 //!
-//! Stores files in a local git repository as content-defined (FastCDC),
-//! zstd-compressed, XChaCha20-Poly1305-sealed, content-addressed chunks.
-//! Everything the store repo contains is ciphertext; a keyfile holds the
-//! master key. See DESIGN.md for the target architecture.
-
-mod chunker;
-mod crypto;
-mod manifest;
-mod store;
+//! Thin binary over the library crate (src/lib.rs). See DESIGN.md for the
+//! architecture and IMPLEMENTATION-PLAN.md for the milestone ladder.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crypto::{keyfile, Keys};
-use manifest::{ChunkRef, Manifest};
-use store::Store;
-
-/// Default zstd compression level (DESIGN.md Section 6.1 PROPOSED).
-const ZSTD_LEVEL: i32 = 3;
+use git_storage::chunker;
+use git_storage::crypto::{keyfile, Keys};
+use git_storage::engine::Engine;
 
 #[derive(Parser)]
 #[command(
     name = "git-storage",
     version,
-    about = "Encrypted, deduplicating file storage in a git repo (milestone 2)"
+    about = "Encrypted, deduplicating, transactional file storage on git repositories (milestone 3)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -37,11 +27,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Chunk, compress, encrypt a file into the store and commit it.
+    /// Chunk, compress, encrypt a file into the store; commit atomically.
     Put {
         /// File to store.
         path: PathBuf,
-        /// Store repository directory (created and `git init`ed if missing).
+        /// Store directory (created if missing; holds index.git + volumes/).
         #[arg(long)]
         repo: PathBuf,
         /// Master keyfile (64 hex chars). Created with the store if missing;
@@ -66,9 +56,22 @@ enum Cmd {
         /// Where to write the reconstructed file.
         #[arg(long)]
         output: PathBuf,
+        /// Read from a pinned log commit (snapshot read) instead of the tip.
+        #[arg(long)]
+        at: Option<String>,
     },
-    /// List stored files (requires the keyfile — names are encrypted).
+    /// List stored files (requires the keyfile — all metadata is encrypted).
     Ls {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        keyfile: PathBuf,
+        /// List at a pinned log commit (snapshot read) instead of the tip.
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// Print the current log tip commit (for snapshot reads with --at).
+    Tip {
         #[arg(long)]
         repo: PathBuf,
         #[arg(long)]
@@ -89,17 +92,19 @@ fn main() -> Result<()> {
             repo,
             keyfile,
             output,
-        } => get(&name, &repo, &keyfile, &output),
-        Cmd::Ls { repo, keyfile } => ls(&repo, &keyfile),
+            at,
+        } => get(&name, &repo, &keyfile, &output, at.as_deref()),
+        Cmd::Ls { repo, keyfile, at } => ls(&repo, &keyfile, at.as_deref()),
+        Cmd::Tip { repo, keyfile } => tip(&repo, &keyfile),
     }
 }
 
-/// Open the store; the keyfile may be created only when the store itself is
-/// brand new (no config yet) — never silently regenerated for existing data.
-fn open_store(repo: &Path, keyfile_path: &Path) -> Result<Store> {
-    let store_is_new = !repo.join("config.json").exists();
+/// Open the engine; the keyfile may be created only when the store itself is
+/// brand new — never silently regenerated for existing data.
+fn open_engine(repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>) -> Result<Engine> {
+    let store_is_new = !Engine::store_exists(repo);
     let master = keyfile::load_or_create(keyfile_path, store_is_new)?;
-    Store::open(repo, Keys::new(master))
+    Engine::open(repo, Keys::new(master), chunk_size)
 }
 
 fn put(path: &Path, repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>) -> Result<()> {
@@ -108,50 +113,18 @@ fn put(path: &Path, repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>)
         .and_then(|n| n.to_str())
         .with_context(|| format!("input path {} has no usable file name", path.display()))?
         .to_string();
-    let store = open_store(repo, keyfile_path)?;
-    let config = store.config_or_init(chunk_size, ZSTD_LEVEL)?;
+    let engine = open_engine(repo, keyfile_path, chunk_size)?;
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = BufReader::new(file);
+    let stats = engine.put(&name, BufReader::new(file))?;
 
-    let mut chunks: Vec<ChunkRef> = Vec::new();
-    let mut new_chunks = 0usize;
-    let mut new_bytes = 0u64;
-    let mut total_size = 0u64;
-
-    let gear_seed = store.keys().gear_seed;
-    let file_hash = chunker::stream_chunks(reader, &config.chunker, gear_seed, |chunk| {
-        total_size += chunk.data.len() as u64;
-        let sealed = store.keys().seal_chunk(&chunk.data, config.zstd_level)?;
-        if store.put_object(&sealed.chunk_id, &sealed.ciphertext)? {
-            new_chunks += 1;
-            new_bytes += sealed.ciphertext.len() as u64;
-        }
-        chunks.push(ChunkRef {
-            id: sealed.chunk_id,
-            plaintext_hash: sealed.plaintext_hash_hex,
-            len: chunk.data.len() as u64,
-        });
-        Ok(())
-    })?;
-
-    let total = chunks.len();
-    let manifest = Manifest {
-        name: name.clone(),
-        size: total_size,
-        avg_chunk_size: config.chunker.avg_size as u64,
-        file_hash,
-        chunks,
-    };
-    store.save_manifest(&manifest)?;
-
-    // Generic commit message: names are encrypted everywhere else in the
-    // store; they must not leak through git history.
-    let committed = store.commit(&format!("put: {total} chunks ({new_chunks} new)"))?;
     println!(
-        "{name}: {total} chunks, {new_chunks} new, {} deduped, {new_bytes} ciphertext bytes written",
-        total - new_chunks
+        "{name}: {} chunks, {} new, {} deduped, {} ciphertext bytes written",
+        stats.total_chunks,
+        stats.new_chunks,
+        stats.total_chunks - stats.new_chunks,
+        stats.ciphertext_bytes
     );
-    if committed {
+    if stats.committed {
         println!("committed to {}", repo.display());
     } else {
         println!("no changes (identical content already stored)");
@@ -159,57 +132,41 @@ fn put(path: &Path, repo: &Path, keyfile_path: &Path, chunk_size: Option<usize>)
     Ok(())
 }
 
-fn get(name: &str, repo: &Path, keyfile_path: &Path, output: &Path) -> Result<()> {
-    let store = open_store(repo, keyfile_path)?;
-    let manifest = store.load_manifest(name)?;
-
+fn get(
+    name: &str,
+    repo: &Path,
+    keyfile_path: &Path,
+    output: &Path,
+    at: Option<&str>,
+) -> Result<()> {
+    let engine = open_engine(repo, keyfile_path, None)?;
     let out = File::create(output).with_context(|| format!("creating {}", output.display()))?;
-    let mut writer = BufWriter::new(out);
-    let mut file_hasher = blake3::Hasher::new();
-
-    for chunk_ref in &manifest.chunks {
-        // get_object verifies the content address; open_chunk verifies the
-        // AEAD tag and the plaintext hash.
-        let ciphertext = store.get_object(&chunk_ref.id)?;
-        let plaintext = store
-            .keys()
-            .open_chunk(&ciphertext, &chunk_ref.plaintext_hash)?;
-        if plaintext.len() as u64 != chunk_ref.len {
-            bail!(
-                "chunk {} length mismatch: manifest says {}, plaintext is {}",
-                chunk_ref.id,
-                chunk_ref.len,
-                plaintext.len()
-            );
-        }
-        chunker::write_and_hash(&mut writer, &mut file_hasher, &plaintext)?;
-    }
-    writer.flush().context("flushing output")?;
-
-    let actual = file_hasher.finalize().to_hex().to_string();
-    if actual != manifest.file_hash {
-        bail!(
-            "whole-file hash mismatch for {name}: manifest expects {}, reconstruction hashes to {actual}",
-            manifest.file_hash
-        );
-    }
+    let size = engine.get(name, BufWriter::new(out), at)?;
     println!(
-        "{name}: {} bytes reconstructed to {}, all hashes verified",
-        manifest.size,
+        "{name}: {size} bytes reconstructed to {}, all hashes verified",
         output.display()
     );
     Ok(())
 }
 
-fn ls(repo: &Path, keyfile_path: &Path) -> Result<()> {
-    let store = open_store(repo, keyfile_path)?;
-    let manifests = store.list_manifests()?;
-    if manifests.is_empty() {
+fn ls(repo: &Path, keyfile_path: &Path, at: Option<&str>) -> Result<()> {
+    let engine = open_engine(repo, keyfile_path, None)?;
+    let namespace = engine.namespace_at(at)?;
+    if namespace.is_empty() {
         println!("store is empty");
         return Ok(());
     }
-    for m in manifests {
+    for m in namespace.values() {
         println!("{}\t{} bytes\t{} chunks", m.name, m.size, m.chunks.len());
+    }
+    Ok(())
+}
+
+fn tip(repo: &Path, keyfile_path: &Path) -> Result<()> {
+    let engine = open_engine(repo, keyfile_path, None)?;
+    match engine.log_tip()? {
+        Some(oid) => println!("{oid}"),
+        None => println!("(empty log)"),
     }
     Ok(())
 }

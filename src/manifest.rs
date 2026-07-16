@@ -1,16 +1,15 @@
-//! File manifests: the metadata layer.
+//! File manifests: per-file metadata records carried by the transaction log.
 //!
-//! MILESTONE 2: manifests are stored ENCRYPTED (sealed under the manifest key,
-//! see crypto.rs) — the backend never sees names, sizes, or chunk lists in
-//! cleartext. This module defines the plaintext shape; sealing happens in
-//! store.rs. The target design replaces per-file manifests with an encrypted,
-//! CAS-serialized transaction log (DESIGN.md Section 8).
+//! MILESTONE 3: manifests no longer live as individual sealed files — they are
+//! records inside the encrypted transaction log (engine.rs, DESIGN.md
+//! Section 8). Each chunk reference carries its placement (volume, segment) so
+//! the read path can resolve chunk ID → segment tree path → blob.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// One chunk reference.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// One chunk reference, including its placement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkRef {
     /// Chunk ID = BLAKE3 (hex) of the ciphertext as stored — the content
     /// address in the object store (DESIGN.md Section 6.6).
@@ -20,10 +19,14 @@ pub struct ChunkRef {
     pub plaintext_hash: String,
     /// Plaintext length in bytes.
     pub len: u64,
+    /// Volume holding this chunk ("v0" until M5's multi-volume budget).
+    pub vol: String,
+    /// Segment (refs/segments/<seg>) whose tree contains the chunk.
+    pub seg: String,
 }
 
-/// Manifest for one stored file (plaintext form; sealed before hitting disk).
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Manifest for one stored file (a record in the transaction log).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     /// Logical name (the input file's name).
     pub name: String,
@@ -64,11 +67,15 @@ mod tests {
                     id: "a".repeat(64),
                     plaintext_hash: "c".repeat(64),
                     len: 1024,
+                    vol: "v0".into(),
+                    seg: "1".repeat(32),
                 },
                 ChunkRef {
                     id: "b".repeat(64),
                     plaintext_hash: "d".repeat(64),
                     len: 210,
+                    vol: "v0".into(),
+                    seg: "1".repeat(32),
                 },
             ],
         };

@@ -145,11 +145,18 @@ fn corrupted_object_fails_get_loudly() {
 
     fx.put(&input, &["--chunk-size", "64k"]);
 
-    // Flip one byte in the first chunk object found.
-    let object = find_first_object(&fx.repo().join("objects"));
+    // Flip one byte in a git loose object inside the volume (M3 layout:
+    // chunks are blobs in volumes/v0.git). Any single-bit corruption must
+    // surface as a loud failure, never silent garbage.
+    let object = find_first_loose_object(&fx.repo().join("volumes/v0.git/objects"));
     let mut bytes = fs::read(&object).unwrap();
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0xFF;
+    // Git writes loose objects read-only; make writable to simulate bit rot.
+    let mut perms = fs::metadata(&object).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(&object, perms).unwrap();
     fs::write(&object, &bytes).unwrap();
 
     let out = bin(fx.home())
@@ -164,8 +171,8 @@ fn corrupted_object_fails_get_loudly() {
     assert!(!out.status.success(), "get must fail on corrupted object");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("hash mismatch"),
-        "error must name the hash mismatch, got: {stderr}"
+        stderr.contains("chunk") || stderr.contains("hash mismatch") || stderr.contains("txn"),
+        "error must point at the corrupted data, got: {stderr}"
     );
 }
 
@@ -219,7 +226,9 @@ fn different_stores_share_nothing() {
                 .arg(&keyfile)
                 .args(["--chunk-size", "256k"]),
         );
-        object_sets.push(object_names(&repo.join("objects")));
+        // M3 layout: chunk ciphertext lives as git blobs in the volume;
+        // compare the sets of loose-object names (derived from ciphertext).
+        object_sets.push(object_names(&repo.join("volumes/v0.git/objects")));
     }
 
     assert!(
@@ -283,7 +292,7 @@ fn wrong_key_fails_cleanly() {
     assert!(!out.status.success(), "wrong key must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("authentication failed") || stderr.contains("no manifest"),
+        stderr.contains("authentication failed") || stderr.contains("no file"),
         "wrong-key failure must be an auth/lookup error, got: {stderr}"
     );
 }
@@ -355,29 +364,35 @@ fn parse_counts(stdout: &str) -> (usize, usize) {
     (total, new)
 }
 
+/// Names of git loose objects under a bare repo's objects/ dir (two-hex-char
+/// fanout; skips info/ and pack/). Full OID = prefix + filename.
 fn object_names(objects_dir: &Path) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
     for prefix in fs::read_dir(objects_dir).unwrap() {
         let prefix = prefix.unwrap().path();
-        if prefix.is_dir() {
+        let dirname = prefix.file_name().unwrap().to_string_lossy().into_owned();
+        if prefix.is_dir() && dirname.len() == 2 {
             for obj in fs::read_dir(&prefix).unwrap() {
-                names.insert(obj.unwrap().file_name().to_string_lossy().into_owned());
+                let name = obj.unwrap().file_name().to_string_lossy().into_owned();
+                names.insert(format!("{dirname}{name}"));
             }
         }
     }
     names
 }
 
-fn find_first_object(objects_dir: &Path) -> PathBuf {
+/// First git loose object file under a bare repo's objects/ dir.
+fn find_first_loose_object(objects_dir: &Path) -> PathBuf {
     for prefix in fs::read_dir(objects_dir).unwrap() {
         let prefix = prefix.unwrap().path();
-        if prefix.is_dir() {
+        let dirname = prefix.file_name().unwrap().to_string_lossy().into_owned();
+        if prefix.is_dir() && dirname.len() == 2 {
             if let Some(obj) = fs::read_dir(&prefix).unwrap().next() {
                 return obj.unwrap().path();
             }
         }
     }
-    panic!("no chunk objects found in {}", objects_dir.display());
+    panic!("no loose objects found in {}", objects_dir.display());
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
