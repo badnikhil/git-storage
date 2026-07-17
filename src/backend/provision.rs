@@ -8,7 +8,7 @@
 //!
 //! Transport: we shell out to `curl` for the single REST call per repo rather
 //! than pull a full async HTTP + TLS stack into the crate. Rationale: control
-//! calls are rare and operator-driven (DESIGN §16 "REST sparingly"), and the
+//! calls are rare and operator-driven (DESIGN Section 16 "REST sparingly"), and the
 //! token stays off-disk — it is read from GITSTORAGE_TOKEN and passed as a
 //! `-H "Authorization: ..."` header for that one invocation, never written to
 //! a credential store or git config.

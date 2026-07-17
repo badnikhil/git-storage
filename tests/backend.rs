@@ -1,5 +1,5 @@
-//! M4 backend tests: rate governor, volume selection (§9.3/§15), budget wall
-//! (§15.3), promisor probe + fallback (§10.3), and env-gated live-host suites
+//! M4 backend tests: rate governor, volume selection (Section 9.3/Section 15), budget wall
+//! (Section 15.3), promisor probe + fallback (Section 10.3), and env-gated live-host suites
 //! (Gitea, GitHub). Everything unit/file:// runs in CI; the live suites skip
 //! cleanly when their env vars are unset.
 //!
@@ -187,7 +187,7 @@ impl MultiVol {
 // ---------- 3. rate governor ----------
 
 /// With a non-trivial push_interval, consecutive segment pushes must be spaced
-/// at least the interval apart (DESIGN §9.5). Uses a generous margin.
+/// at least the interval apart (DESIGN Section 9.5). Uses a generous margin.
 #[test]
 fn rate_governor_spaces_pushes() {
     let interval_ms = 400u64;
@@ -231,7 +231,7 @@ fn rate_governor_spaces_pushes() {
     );
 }
 
-// ---------- 4. budget wall (§15.3) ----------
+// ---------- 4. budget wall (Section 15.3) ----------
 
 /// With an artificially tiny volume-full threshold, writes must be REFUSED
 /// once the volume can't hold the next segment. The refusal must be clean and
@@ -273,7 +273,7 @@ fn budget_wall_refuses_and_store_stays_consistent() {
     assert!(!fx.tmp.path().join("remotes/v1.git").exists());
 }
 
-// ---------- 5. volume selection (§9.3 / §15.5) ----------
+// ---------- 5. volume selection (Section 9.3 / Section 15.5) ----------
 
 /// Placement goes to the volume with the MOST free headroom below threshold;
 /// with N >= 3 volumes the last-declared one is the reserved spare and never
@@ -316,7 +316,7 @@ fn volume_selection_prefers_headroom_and_reserves_spare() {
     );
 }
 
-// ---------- 6. promisor probe + fallback (§10.3) ----------
+// ---------- 6. promisor probe + fallback (Section 10.3) ----------
 
 /// The read path works both with promisor blob-by-OID fetch AND with the
 /// forced full-segment fallback (GITSTORAGE_FORCE_FULL_FETCH=1). Both must

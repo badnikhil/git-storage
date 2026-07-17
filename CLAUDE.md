@@ -15,13 +15,13 @@ README.md carries the project's policy commitments — never contradict them
   two-phase commit, checkpoints, snapshot reads (--at), crash matrix C1–C4
   tested via GITSTORAGE_CRASH injection. Crate = lib + thin bin.
 - M4 complete (file:// + unit; live host verdicts pending): Backend trait
-  (src/backend.rs) = the two DESIGN §2.1 primitives + read/lifecycle. Two impls:
+  (src/backend.rs) = the two DESIGN Section 2.1 primitives + read/lifecycle. Two impls:
   LocalBackend (wraps Bare) and RemoteBackend (git wire over file:///https://
   /ssh://, mirror-then-push, --force-with-lease CAS, promisor blob-by-OID read
   + probe + full-fetch fallback, per-repo push throttle + 429 backoff, token
   ONLY from GITSTORAGE_TOKEN as a header). Engine is Box<dyn Backend>, config
-  declares a fixed volume set (volumes[] + index_url), volume selection §9.3 +
-  budget wall §15.3 + spare slot at N≥3. Init-time provisioning
+  declares a fixed volume set (volumes[] + index_url), volume selection Section 9.3 +
+  budget wall Section 15.3 + spare slot at N≥3. Init-time provisioning
   (src/backend/provision.rs, CONTROL PLANE ONLY, GitHub/Gitea, idempotent-safe).
   M3 stores keep working with zero migration (absent volumes[] → local v0).
   Whole M3 correctness surface (crash C1–C4, snapshots, CAS race) reruns green
@@ -32,14 +32,14 @@ README.md carries the project's policy commitments — never contradict them
   live/dead/util). Byte accounting now comes wholly from the log — each txn
   carries SegRec{vol,seg,bytes}, each ChunkRef carries clen — so stats/selection/
   budget need ZERO segment fetches (fixes the M4 read-amp residual). Hysteresis-
-  gated compaction (§12.4: dead>50% AND util≥80% AND ≥24h; all env-tunable,
+  gated compaction (Section 12.4: dead>50% AND util≥80% AND ≥24h; all env-tunable,
   `compact --force` bypasses pressure+interval) with delete-only-after-CAS
-  (§12.3): content-derived rewrite segment id = idempotent crash redo; Compact
+  (Section 12.3): content-derived rewrite segment id = idempotent crash redo; Compact
   txn is the commit point; source repo destroyed ONLY after the CAS. Concurrency
   guard: repoint rebuilt from current namespace each attempt, aborts if a racing
   put left un-rewritten data on the retiring volume (no data loss). Spare slot is
-  the compaction dest (§15.5); slot reuse, never fleet growth. Orphan sweep with
-  safety window (§12.5, default 1h). Compaction crash matrix + churn guard +
+  the compaction dest (Section 15.5); slot reuse, never fleet growth. Orphan sweep with
+  safety window (Section 12.5, default 1h). Compaction crash matrix + churn guard +
   budget wall + volume selection tested in tests/compaction.rs (11 tests, incl.
   crash injection over file:// RemoteBackend). 61 tests total. See
   agent-docs/milestone-5.md.
@@ -108,7 +108,7 @@ each volume; remotes reached via the URL in config)
   fuzz/cli/property). Two known limitations are documented as DESIGN Open
   Problems 7 (compaction not snapshot-aware — old snapshots fail LOUDLY after
   compaction) and 8 (concurrent write during same-volume compaction is outside
-  the §13.1 single-writer model; M5's guard covers committed data, not in-flight).
+  the Section 13.1 single-writer model; M5's guard covers committed data, not in-flight).
 - `agent-docs/` — **local-only shared agent knowledge base. NEVER commit, stage,
   or push anything in it.** Read it before starting work; keep it updated as you
   work (decisions + why, findings, changes).

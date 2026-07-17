@@ -120,7 +120,7 @@ enum Cmd {
         #[arg(long)]
         keyfile: PathBuf,
     },
-    /// Logically delete a stored file (DESIGN §12.1). The bytes are reclaimed
+    /// Logically delete a stored file (DESIGN Section 12.1). The bytes are reclaimed
     /// later by compaction; deleting an unknown name fails cleanly.
     Rm {
         /// Stored file name (as shown by `ls`).
@@ -130,7 +130,7 @@ enum Cmd {
         #[arg(long)]
         keyfile: PathBuf,
     },
-    /// Reclaim dead bytes by compacting eligible volumes (DESIGN §12.3/12.4).
+    /// Reclaim dead bytes by compacting eligible volumes (DESIGN Section 12.3/12.4).
     /// Hysteresis-gated: runs only when the dead-ratio, budget-pressure and
     /// min-interval gates all pass (tunable via GITSTORAGE_* env for tests).
     Compact {
@@ -144,7 +144,7 @@ enum Cmd {
         force: bool,
     },
     /// Mirror the whole store (index + every volume) to an INDEPENDENT second
-    /// backend for durability (DESIGN §14.3). Push-only + idempotent; the mirror
+    /// backend for durability (DESIGN Section 14.3). Push-only + idempotent; the mirror
     /// is ciphertext only. Targets are provisioned exactly like `init` (file://
     /// inited as bare repos; https:// created via control-plane REST with
     /// GITSTORAGE_TOKEN; ssh:// assumed to exist). Needs a --to-volume for every

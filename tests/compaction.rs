@@ -43,7 +43,7 @@ fn varied_bytes(len: usize, mut state: u64) -> Vec<u8> {
 /// url=None makes each volume a `LocalBackend` bare repo under `volumes/<id>.git`
 /// — the only way to declare a MULTI-volume store without going over the wire,
 /// and exactly what exercises volume selection / compaction placement locally.
-/// With N >= 3 volumes the last one is reserved as the compaction spare (§15.5).
+/// With N >= 3 volumes the last one is reserved as the compaction spare (Section 15.5).
 fn open_multivol(root: &Path, thresholds: &[u64]) -> Engine {
     let volumes: Vec<VolumeConfig> = thresholds
         .iter()
@@ -259,7 +259,7 @@ fn churn_guard_min_interval_blocks_immediate_recompaction() {
 
     // Round 2: recreate the same pressured+dead condition on the (reused) v0
     // slot. A non-force compaction must now be BLOCKED by the 24h min-interval
-    // gate — the anti-churn hysteresis (DESIGN §12.4).
+    // gate — the anti-churn hysteresis (DESIGN Section 12.4).
     fill_and_delete_majority(&mut engine, 100);
     let r2 = engine.compact(false).unwrap();
     assert!(
@@ -488,10 +488,10 @@ impl RemoteStore {
     }
 }
 
-/// Exit code the crash hook uses (DESIGN §11).
+/// Exit code the crash hook uses (DESIGN Section 11).
 const CRASH_EXIT: i32 = 97;
 
-/// Delete-only-after-CAS crash matrix (DESIGN §12.3): killing compaction at any
+/// Delete-only-after-CAS crash matrix (DESIGN Section 12.3): killing compaction at any
 /// phase boundary must leave the store fully readable, and a follow-up compact
 /// converges to a clean, consistent state. Runs over file:// (RemoteBackend).
 fn compaction_crash_body(point: &str) {
@@ -570,7 +570,7 @@ fn compaction_crash_before_delete_is_recoverable() {
     compaction_crash_body("compact-before-delete");
 }
 
-/// Orphan sweep safety window (DESIGN §12.5): a crash-orphaned segment (C2:
+/// Orphan sweep safety window (DESIGN Section 12.5): a crash-orphaned segment (C2:
 /// pushed but never committed to the log) is collectible only once older than
 /// the window. A young orphan is left untouched; a zero window reclaims it.
 #[test]
@@ -624,7 +624,7 @@ fn orphan_sweep_respects_safety_window() {
 // ===================== M5/M6 edge coverage (added) =============================
 
 /// Liveness is namespace-wide: a chunk shared by several files counts ONCE and
-/// stays live until the LAST referrer is removed (DESIGN §12.2). Two identical
+/// stays live until the LAST referrer is removed (DESIGN Section 12.2). Two identical
 /// files share every chunk; removing one leaves them all live, removing both
 /// makes them all dead.
 #[test]
@@ -687,7 +687,7 @@ fn compact_with_nothing_dead_is_a_clean_noop() {
     assert_eq!(out, varied_bytes(100 * 1024, 71));
 }
 
-/// KNOWN LIMITATION, locked as a SAFETY guarantee (DESIGN §13.3 vs §12): a
+/// KNOWN LIMITATION, locked as a SAFETY guarantee (DESIGN Section 13.3 vs Section 12): a
 /// snapshot pinned BEFORE a compaction that retired the volumes it references is
 /// no longer readable — compaction reclaims old versions. The guarantee we DO
 /// make is that such a read fails LOUDLY (missing segment/chunk), never returns

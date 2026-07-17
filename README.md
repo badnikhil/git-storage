@@ -144,7 +144,7 @@ Reproduce the throughput / dedup / chunk-size numbers with one command:
 
 ## Threat model — what the encryption protects (and what it does not)
 
-Encryption is **keyed convergent** (DESIGN.md §6.3): dedup still works within a
+Encryption is **keyed convergent** (DESIGN.md Section 6.3): dedup still works within a
 store, and an outsider cannot confirm-a-guessed-file against it. Being honest
 about the boundaries:
 
@@ -165,9 +165,9 @@ about the boundaries:
   (independent second backend) is the mitigation, not the encryption.
 - **Access-pattern / size side-channels.** The backend still sees blob sizes,
   counts, and access timing. Chunk *boundaries* are hidden by a per-store
-  key-derived gear seed (§5.4), but coarse volume/segment sizes are observable.
+  key-derived gear seed (Section 5.4), but coarse volume/segment sizes are observable.
 - **Cross-store correlation is intentionally impossible** (no cross-user dedup,
-  §7) — a non-goal turned into a privacy property, not a gap.
+  Section 7) — a non-goal turned into a privacy property, not a gap.
 
 ## Status and what's left
 
@@ -206,9 +206,9 @@ demo at most, never the primary interface).
 
 ### Open problems (current, tracked as GitHub issues)
 
-The authoritative list is **DESIGN.md §18**. The ones a user should know about:
+The authoritative list is **DESIGN.md Section 18**. The ones a user should know about:
 
-| DESIGN §18 | Problem | Current guarantee / status | Issue |
+| DESIGN Section 18 | Problem | Current guarantee / status | Issue |
 |---|---------|----------------------------|-------|
 | 3 | Gitea/Forgejo promisor fetch unverified | Mechanism + fallback implemented; **live verdict pending** | [#3](https://github.com/badnikhil/git-storage/issues/3) |
 | 6 | Index/log repo grows unbounded | No safe prune protocol yet; blocks long-lived stores | [#4](https://github.com/badnikhil/git-storage/issues/4) |
@@ -225,7 +225,7 @@ sets the limits.** On hosted providers the project's stance is: stay small, stay
 within documented limits, and never build features to evade them.
 
 GitHub's Acceptable Use Policies are explicit about the risk. From
-**§9 "Excessive Bandwidth Use"**
+**Section 9 "Excessive Bandwidth Use"**
 ([GitHub Acceptable Use Policies](https://docs.github.com/en/site-policy/acceptable-use-policies/github-acceptable-use-policies)):
 
 > "The Service's bandwidth limitations vary based on the features you use. If we determine your bandwidth usage to be significantly excessive in relation to other users of similar features, we reserve the right to suspend your Account, throttle your file hosting, or otherwise limit your activity until you can reduce your bandwidth consumption. We also reserve the right—after providing advance notice—to delete repositories that we determine to be placing undue strain on our infrastructure."

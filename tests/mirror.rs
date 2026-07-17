@@ -1,4 +1,4 @@
-//! M6 test: whole-store mirror to an independent backend (DESIGN §14.3).
+//! M6 test: whole-store mirror to an independent backend (DESIGN Section 14.3).
 //!
 //! A store is mirrored to a SECOND, independent set of file:// repos, then a
 //! fresh store is pointed at the mirror (same keyfile) and every file must read

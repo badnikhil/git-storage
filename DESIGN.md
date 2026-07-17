@@ -976,7 +976,7 @@ otherwise. The only honest use of erasure coding is **across independent backend
 > **Implementation delta (M6, 2026-07-18).** The whole-store mirror is
 > implemented: `Engine::mirror` (CLI `mirror`) pushes every volume and then the
 > index/log to an independent second set of git repos. Ordering is
-> data-before-manifest (volumes first, index last, §8.3) so the mirror's log
+> data-before-manifest (volumes first, index last, Section 8.3) so the mirror's log
 > never references segments not yet mirrored. The push is `refs/*:refs/*`
 > `--force` from the source's local bare repo (remote-backed volumes are
 > `fetch`-completed into their mirror first), living in the backend layer's
@@ -1069,7 +1069,7 @@ is low-volume by construction.
 > *non-empty* foreign repo makes `init` fail loudly rather than clobber it.
 > Crucially, the **data-plane adapter (`RemoteBackend`) has no repo-creation
 > capability whatsoever** — repo creation is reachable only from `init`, only via
-> the control-plane module. This preserves the §16 invariant (data plane = git
+> the control-plane module. This preserves the Section 16 invariant (data plane = git
 > protocol only) while giving `init` a one-shot, operator-driven way to stand up
 > the fixed budget of volumes. Provisioning shells out to `curl` (token passed as
 > an `Authorization` header, never written to disk) to avoid adding an async

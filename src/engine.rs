@@ -50,24 +50,24 @@ const VOL0: &str = "v0";
 /// Give up after this many consecutive CAS rejections (would indicate a bug
 /// or a pathological writer storm, not normal contention).
 const MAX_CAS_RETRIES: u32 = 32;
-/// Default per-volume full threshold when config omits it (DESIGN §15.2).
+/// Default per-volume full threshold when config omits it (DESIGN Section 15.2).
 pub const DEFAULT_VOLUME_FULL_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
-/// Spare slot becomes mandatory at N ≥ this many volumes (DESIGN §15.5).
+/// Spare slot becomes mandatory at N ≥ this many volumes (DESIGN Section 15.5).
 const SPARE_SLOT_MIN_VOLUMES: usize = 3;
 
-/// Compaction hysteresis gate defaults (DESIGN §12.4). All three must hold for a
+/// Compaction hysteresis gate defaults (DESIGN Section 12.4). All three must hold for a
 /// volume to be eligible. Overridable at runtime (env, below) so tests can tune.
 const DEFAULT_DEAD_RATIO_GATE: f64 = 0.50; // dead bytes / total > 50%
 const DEFAULT_PRESSURE_UTIL_GATE: f64 = 0.80; // store util >= 80% of budget
 const DEFAULT_MIN_COMPACT_INTERVAL_SECS: i64 = 24 * 3600; // 24h anti-churn floor
-/// Orphan-sweep safety window (DESIGN §12.5): a segment ref unreferenced by the
+/// Orphan-sweep safety window (DESIGN Section 12.5): a segment ref unreferenced by the
 /// manifest is collectible only once older than this (comfortably beyond max
 /// staging age). Overridable via GITSTORAGE_ORPHAN_WINDOW_SECS for tests.
 const DEFAULT_ORPHAN_WINDOW_SECS: i64 = 3600; // 1 hour
 
 pub type Namespace = BTreeMap<String, Manifest>;
 
-/// The compaction hysteresis gates (DESIGN §12.4), resolved from defaults and
+/// The compaction hysteresis gates (DESIGN Section 12.4), resolved from defaults and
 /// per-invocation env overrides so tests can drive compaction deterministically.
 /// These are the ONLY knobs that make compaction fire; there is no background
 /// thread — compaction runs only when [`Engine::compact`] is invoked and every
@@ -144,7 +144,7 @@ enum Txn {
         put: Option<Manifest>,
         #[serde(skip_serializing_if = "Option::is_none")]
         remove: Option<String>,
-        /// Segments sealed by this transaction (DESIGN §8.2 seal records).
+        /// Segments sealed by this transaction (DESIGN Section 8.2 seal records).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         seals: Vec<SegRec>,
     },
@@ -156,7 +156,7 @@ enum Txn {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         seg_index: Vec<SegRec>,
     },
-    /// Compaction commit point (DESIGN §12.3 step 5): live chunks of `retired`
+    /// Compaction commit point (DESIGN Section 12.3 step 5): live chunks of `retired`
     /// volumes were rewritten into `seals` on the spare/headroom volumes; the
     /// listed files are repointed to their new placements. Applying this txn
     /// makes the retired volumes unreferenced, so they can be deleted AFTER this
@@ -173,7 +173,7 @@ enum Txn {
     },
 }
 
-/// One declared volume in the fixed volume set (DESIGN §15.1). `url` absent =
+/// One declared volume in the fixed volume set (DESIGN Section 15.1). `url` absent =
 /// a local bare repo under `volumes/<id>.git` (the M3 transport); present =
 /// a remote git URL (file://, https://, ssh://).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,7 +218,7 @@ pub struct PutStats {
     pub volume: Option<String>,
 }
 
-/// Per-volume liveness + budget accounting for `stats` (DESIGN §12.2, §15).
+/// Per-volume liveness + budget accounting for `stats` (DESIGN Section 12.2, Section 15).
 /// All figures are derived from the log alone (namespace + segment index); no
 /// segment is fetched (the M4 read-amplification fix).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,7 +247,7 @@ impl VolumeStats {
         }
     }
 
-    /// total / threshold, in [0, ∞). Budget utilization (DESIGN §15.2).
+    /// total / threshold, in [0, ∞). Budget utilization (DESIGN Section 15.2).
     pub fn utilization(&self) -> f64 {
         if self.threshold == 0 {
             0.0
@@ -257,10 +257,10 @@ impl VolumeStats {
     }
 }
 
-/// What one `compact` invocation did (DESIGN §12.3). Empty `compacted` means the
+/// What one `compact` invocation did (DESIGN Section 12.3). Empty `compacted` means the
 /// hysteresis gates blocked every volume — a normal, expected outcome (churn
-/// guard, §12.4). `orphans_swept` counts C2-style crash orphans reclaimed by the
-/// safety-windowed sweep (§12.5).
+/// guard, Section 12.4). `orphans_swept` counts C2-style crash orphans reclaimed by the
+/// safety-windowed sweep (Section 12.5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactReport {
     pub compacted: Vec<CompactedVolume>,
@@ -282,7 +282,7 @@ struct VolumeHandle {
     id: String,
     backend: Box<dyn Backend>,
     threshold: u64,
-    /// True if reserved as the compaction spare (DESIGN §15.5): no ordinary
+    /// True if reserved as the compaction spare (DESIGN Section 15.5): no ordinary
     /// writes land here.
     spare: bool,
 }
@@ -334,7 +334,7 @@ impl Engine {
         Ok(self.load_state(at)?.0)
     }
 
-    /// Per-volume liveness + budget accounting (DESIGN §12.2, §15) for `stats`
+    /// Per-volume liveness + budget accounting (DESIGN Section 12.2, Section 15) for `stats`
     /// and compaction gating. All figures come from the log (namespace + seg
     /// index) with ZERO segment fetches.
     pub fn stats(&self) -> Result<Vec<VolumeStats>> {
@@ -346,7 +346,7 @@ impl Engine {
     fn volume_stats(&self, state: &StoreState) -> Vec<VolumeStats> {
         // Live bytes per volume: sum of ciphertext sizes of DISTINCT live chunks
         // (a chunk shared by several files counts once). Liveness = referenced
-        // by the current namespace (DESIGN §12.2).
+        // by the current namespace (DESIGN Section 12.2).
         let mut live_chunks: BTreeSet<&str> = BTreeSet::new();
         let mut live_by_vol: BTreeMap<&str, u64> = BTreeMap::new();
         for m in state.namespace.values() {
@@ -384,7 +384,7 @@ impl Engine {
             .collect()
     }
 
-    /// Whole-store mirror to an independent backend (DESIGN §14.3): push the
+    /// Whole-store mirror to an independent backend (DESIGN Section 14.3): push the
     /// index/log and every volume to a second, independent set of git repos, so
     /// the store survives the loss of the primary backend. Push-only and
     /// idempotent (re-running mirrors only new objects). `volume_targets` must
@@ -430,7 +430,7 @@ impl Engine {
 
         // Known placements: chunk_id -> (vol, seg, ciphertext_len) across the
         // whole namespace. The clen lets a deduped chunk re-carry its stored
-        // size into the new manifest for live/dead accounting (DESIGN §12.2).
+        // size into the new manifest for live/dead accounting (DESIGN Section 12.2).
         let mut known: BTreeMap<String, (String, String, u64)> = BTreeMap::new();
         for m in namespace.values() {
             for c in &m.chunks {
@@ -558,7 +558,7 @@ impl Engine {
 
         maybe_crash("after-segment"); // C2: segment reachable, log unaware
 
-        // The seal record for the new segment (DESIGN §8.2), carried in the txn
+        // The seal record for the new segment (DESIGN Section 8.2), carried in the txn
         // so byte accounting needs no segment fetch. None if this put stored no
         // new data (pure dedup / metadata-only manifest change).
         let new_seal = landed_volume.as_ref().map(|vid| SegRec {
@@ -690,9 +690,9 @@ impl Engine {
         Ok(manifest.size)
     }
 
-    /// Logically delete `name` (DESIGN §12.1): append a transaction that drops
+    /// Logically delete `name` (DESIGN Section 12.1): append a transaction that drops
     /// the namespace entry. The chunks stay on disk — their bytes become dead and
-    /// are reclaimed later by compaction (§12.3). Removing a name that is not in
+    /// are reclaimed later by compaction (Section 12.3). Removing a name that is not in
     /// the store fails cleanly (no transaction is written).
     ///
     /// This is metadata-only: no Phase-1 data write, just the Phase-2 CAS commit
@@ -750,7 +750,7 @@ impl Engine {
         bail!("log CAS failed {MAX_CAS_RETRIES} times — giving up (pathological contention?)");
     }
 
-    /// Reclaim dead bytes by compacting eligible volumes (DESIGN §12.3/12.4).
+    /// Reclaim dead bytes by compacting eligible volumes (DESIGN Section 12.3/12.4).
     ///
     /// Hysteresis: a volume is a candidate only when its dead-ratio exceeds the
     /// gate; the pass runs at all only under budget pressure and after the
@@ -758,7 +758,7 @@ impl Engine {
     /// interval gates (operator/test escape hatch) but NEVER the dead-ratio gate
     /// and NEVER the delete-only-after-CAS ordering.
     ///
-    /// Procedure (delete-only-after-CAS, §12.3):
+    /// Procedure (delete-only-after-CAS, Section 12.3):
     ///
     /// 1. Rewrite each candidate's LIVE chunks into a fresh segment on the
     ///    spare/headroom volume (Phase 1, idempotent, content-addressed).
@@ -771,7 +771,7 @@ impl Engine {
     /// readable (new placements) with the old repos as reclaimable garbage — the
     /// next `compact` finishes the delete. The store is readable at every point.
     ///
-    /// Always sweeps safety-windowed orphans (§12.5) regardless of gate outcome.
+    /// Always sweeps safety-windowed orphans (Section 12.5) regardless of gate outcome.
     pub fn compact(&mut self, force: bool) -> Result<CompactReport> {
         let gates = CompactionGates::from_env();
         let mut report = CompactReport::default();
@@ -837,7 +837,7 @@ impl Engine {
         let bytes_before = volume_used(vid, &base_state.seg_index);
 
         // Pick a destination volume with room for the live bytes: prefer the
-        // spare (its whole purpose, §15.5), then any writable volume that is not
+        // spare (its whole purpose, Section 15.5), then any writable volume that is not
         // the one being retired and has headroom. If none fits, refuse (the
         // budget wall still holds during compaction — never grow the fleet).
         let dest_idx = self.select_compact_dest(vid, live_bytes, &base_state.seg_index)?;
@@ -1021,7 +1021,7 @@ impl Engine {
         Ok(false)
     }
 
-    /// Sweep C2-style orphan segments (DESIGN §12.5): segment refs that no live
+    /// Sweep C2-style orphan segments (DESIGN Section 12.5): segment refs that no live
     /// manifest references AND that are older than the safety window (by commit
     /// time). Never touches in-flight staging (young segments stay). Returns the
     /// number of orphan segment refs deleted.
@@ -1059,7 +1059,7 @@ impl Engine {
     }
 
     /// Pick a destination for compacting `retiring`'s `live_bytes`: the spare
-    /// first (§15.5), else any other writable volume with headroom. Excludes the
+    /// first (Section 15.5), else any other writable volume with headroom. Excludes the
     /// volume being retired. None = no room (leave it for a later pass; the fleet
     /// never grows).
     fn select_compact_dest(
@@ -1119,7 +1119,7 @@ impl Engine {
     }
 
     /// Commit time of the most recent compaction commit, or None if the log has
-    /// none — the interval gate's reference point (DESIGN §12.4).
+    /// none — the interval gate's reference point (DESIGN Section 12.4).
     fn last_compaction_time(&self) -> Result<Option<i64>> {
         let Some(tip) = self.log_tip()? else {
             return Ok(None);
@@ -1149,7 +1149,7 @@ impl Engine {
     }
 
     /// Count compaction commits in the whole log — the churn-guard assertion
-    /// (DESIGN §12.4: hysteresis must prevent repeated compactions).
+    /// (DESIGN Section 12.4: hysteresis must prevent repeated compactions).
     pub fn compaction_count(&self) -> Result<usize> {
         let Some(tip) = self.log_tip()? else {
             return Ok(0);
@@ -1166,10 +1166,10 @@ impl Engine {
     // ---------- internals ----------
 
     /// Choose the destination volume for a new segment of `projected` bytes
-    /// (DESIGN §9.3): among the WRITABLE volumes (spare excluded when N ≥ 3),
+    /// (DESIGN Section 9.3): among the WRITABLE volumes (spare excluded when N ≥ 3),
     /// the one with the most free headroom below its threshold whose projected
     /// post-write size still fits. Ties broken by lowest volume ID. If none can
-    /// accept the segment, the budget wall refuses (DESIGN §15.3).
+    /// accept the segment, the budget wall refuses (DESIGN Section 15.3).
     ///
     /// Usage comes from the log-derived `seg_index` (no segment fetch — the M4
     /// read-amplification fix).
@@ -1181,7 +1181,7 @@ impl Engine {
         let mut best: Option<(usize, u64)> = None; // (index, headroom)
         for (i, v) in self.volumes.iter().enumerate() {
             if v.spare {
-                continue; // reserved for compaction (DESIGN §15.5)
+                continue; // reserved for compaction (DESIGN Section 15.5)
             }
             let used = volume_used(&v.id, seg_index);
             let after = used.saturating_add(projected);
@@ -1215,10 +1215,10 @@ impl Engine {
     }
 
     /// Full store state at a pinned commit or the current tip: the namespace
-    /// AND the segment-size index (DESIGN §8.2 seal records) reconstructed from
+    /// AND the segment-size index (DESIGN Section 8.2 seal records) reconstructed from
     /// the log. The seg index lets stats/liveness/volume-selection size volumes
     /// with ZERO segment fetches (the M4 read-amplification fix). Reader model
-    /// per DESIGN §8.6: newest checkpoint (which carries a full seg index) then
+    /// per DESIGN Section 8.6: newest checkpoint (which carries a full seg index) then
     /// the delta/compaction tail applied forward.
     fn load_full_state(&self, at: Option<&str>) -> Result<StoreState> {
         let tip = match at {
@@ -1386,7 +1386,7 @@ fn seg_index_records(map: &BTreeMap<(String, String), u64>) -> Vec<SegRec> {
 }
 
 /// Bytes stored in `vol` per the log-derived segment-size index. This is the
-/// authoritative accounting (DESIGN §8.2) and needs ZERO segment fetches.
+/// authoritative accounting (DESIGN Section 8.2) and needs ZERO segment fetches.
 fn volume_used(vol: &str, seg_index: &BTreeMap<(String, String), u64>) -> u64 {
     seg_index
         .iter()
@@ -1424,8 +1424,8 @@ fn compact_segment_id(retiring: &str, live_ids: &BTreeSet<String>) -> String {
 }
 
 /// Current wall-clock time in unix seconds. The reference clock for the
-/// compaction min-interval gate (DESIGN §12.4) and the orphan-sweep safety
-/// window (§12.5). A clock before the epoch (impossible in practice) reads 0,
+/// compaction min-interval gate (DESIGN Section 12.4) and the orphan-sweep safety
+/// window (Section 12.5). A clock before the epoch (impossible in practice) reads 0,
 /// which only makes those gates more conservative.
 fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

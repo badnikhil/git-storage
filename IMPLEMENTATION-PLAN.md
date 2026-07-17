@@ -20,7 +20,7 @@ Current state (2026-07-16): two earlier agent runs were interrupted, leaving
 partial artifacts that M0 and M0.5 absorb:
 
 - `Cargo.toml`, `.gitignore`, and a partial `src/chunker.rs` exist → reconciled/finished in M0.
-- `DESIGN.md` still contains ~138 `§` characters from an interrupted notation
+- `DESIGN.md` still contains ~138 `Section ` characters from an interrupted notation
   cleanup, and its Appendix B may still say the language decision is deferred →
   M0 (spec half).
 - The project root is **not yet a git repository** → step 0 below.
@@ -84,13 +84,13 @@ addressing), 7 (dedup) in naive form.
 
 ### Spec-hygiene half (no code — runs in parallel with the code half)
 
-After this half lands, DESIGN.md is clean of `§` notation, records Rust as the
+After this half lands, DESIGN.md is clean of `Section ` notation, records Rust as the
 decided language, and contains the four review-round1 fixes (spare compaction
 slot, log-growth open problem, chunk-ID→OID lookup step, checkpoint sharding
 note). Later milestones implement against the amended spec.
 
 **In scope**
-- Finish `§` → "Section N" cleanup (all ~138 occurrences; keep sentences grammatical).
+- Finish `Section ` → "Section N" cleanup (all ~138 occurrences; keep sentences grammatical).
 - Verify/complete the Appendix B edit: Rust is **decided**, not deferred.
 - Apply the four design-review-round1 findings (agent-docs/design-review-round1.md):
   1. Spare compaction slot: reserve one volume slot as compaction headroom
@@ -104,7 +104,7 @@ note). Later milestones implement against the amended spec.
 **Explicitly NOT in scope (spec half):** any new design work beyond the four
 findings.
 
-**Exit criteria (spec half):** zero `§` in DESIGN.md; Appendix B says Rust
+**Exit criteria (spec half):** zero `Section ` in DESIGN.md; Appendix B says Rust
 decided; all four findings visible in the spec; review-round1 doc marked
 resolved.
 

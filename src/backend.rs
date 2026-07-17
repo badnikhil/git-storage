@@ -194,7 +194,7 @@ pub struct RemoteBackend {
     force_full_fetch: bool,
 }
 
-/// Max backoff attempts on HTTP 429 / secondary rate limit (DESIGN §9.5).
+/// Max backoff attempts on HTTP 429 / secondary rate limit (DESIGN Section 9.5).
 const MAX_RATE_LIMIT_RETRIES: u32 = 5;
 
 impl RemoteBackend {
@@ -263,7 +263,7 @@ impl RemoteBackend {
     }
 
     /// Run a network git op with exponential-backoff-plus-jitter retry on
-    /// HTTP 429 / secondary-rate-limit responses (DESIGN §9.5). `is_ok`
+    /// HTTP 429 / secondary-rate-limit responses (DESIGN Section 9.5). `is_ok`
     /// classifies the output; any non-429 failure is returned to the caller
     /// unretried.
     fn net_git_retrying(&self, args: &[&str]) -> Result<std::process::Output> {
@@ -319,7 +319,7 @@ impl RemoteBackend {
     }
 
     /// Blob-filtered fetch of a ref: brings trees + commits local but leaves
-    /// blobs as promisor placeholders (DESIGN §10.3). Returns Err if the
+    /// blobs as promisor placeholders (DESIGN Section 10.3). Returns Err if the
     /// server rejects the filter (no partial-clone support).
     fn fetch_ref_filtered(&self, refname: &str) -> Result<()> {
         let out = self.net_git_retrying(&[
@@ -522,7 +522,7 @@ impl Backend for RemoteBackend {
             .collect())
     }
 
-    /// Read a chunk blob (DESIGN §10.3). Preferred path: blob-filtered fetch
+    /// Read a chunk blob (DESIGN Section 10.3). Preferred path: blob-filtered fetch
     /// of the segment (trees local, blobs on demand), then resolve the fanout
     /// path → blob OID locally and demand-fetch just that blob. Fallback: full
     /// segment fetch. `rev` here is a `refs/segments/<id>` ref; `path` is the

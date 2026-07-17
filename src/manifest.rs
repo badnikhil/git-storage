@@ -20,7 +20,7 @@ pub struct ChunkRef {
     /// Plaintext length in bytes.
     pub len: u64,
     /// Ciphertext length in bytes = the stored size of this chunk (M5). Enables
-    /// per-chunk live/dead accounting from the manifest alone (DESIGN §12.2)
+    /// per-chunk live/dead accounting from the manifest alone (DESIGN Section 12.2)
     /// without fetching segments. Defaults to 0 for pre-M5 manifests, which
     /// simply fall back to segment-total accounting.
     #[serde(default)]
