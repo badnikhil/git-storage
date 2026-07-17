@@ -557,6 +557,7 @@ impl Engine {
         };
 
         maybe_crash("after-segment"); // C2: segment reachable, log unaware
+        maybe_pause("after-segment"); // issue #8: hold here (segment pushed, not committed)
 
         // The seal record for the new segment (DESIGN Section 8.2), carried in the txn
         // so byte accounting needs no segment fetch. None if this put stored no
@@ -1442,6 +1443,22 @@ fn maybe_crash(point: &str) {
     if std::env::var("GITSTORAGE_CRASH").as_deref() == Ok(point) {
         eprintln!("simulated crash at {point}");
         std::process::exit(97);
+    }
+}
+
+/// Pause-injection hook, the crash hook's non-fatal sibling: if GITSTORAGE_PAUSE
+/// names this point, sleep GITSTORAGE_PAUSE_MS (default 1500) here. Tests use it
+/// to open a deterministic window for a concurrent operation — e.g. holding a
+/// write between its Phase-1 push and its Phase-2 commit while a compaction runs
+/// (the race in issue #8). No effect unless the env var is set, so it is inert
+/// in normal operation.
+fn maybe_pause(point: &str) {
+    if std::env::var("GITSTORAGE_PAUSE").as_deref() == Ok(point) {
+        let ms = std::env::var("GITSTORAGE_PAUSE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1500);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
 

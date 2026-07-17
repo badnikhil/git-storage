@@ -18,7 +18,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::Duration;
 
 use tempfile::TempDir;
 
@@ -452,6 +453,52 @@ impl RemoteStore {
             .output()
             .expect("spawning git-storage get --at")
     }
+    /// `get name` at the tip, returning the raw Output (may fail).
+    fn get_output(&self, name: &str) -> Output {
+        let out = self.tmp.path().join(format!("tip-{name}"));
+        bin(self.home())
+            .args(["get", name, "--output"])
+            .arg(&out)
+            .args(["--repo"])
+            .arg(self.repo())
+            .args(["--keyfile"])
+            .arg(self.keyfile())
+            .output()
+            .expect("spawning git-storage get")
+    }
+    /// Overwrite one volume's full-threshold in config.json (the CLI applies one
+    /// threshold to all volumes; tests that need distinct ones post-edit).
+    fn patch_threshold(&self, vol_id: &str, threshold: u64) {
+        let p = self.repo().join("config.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        for v in cfg["volumes"].as_array_mut().unwrap() {
+            if v["id"] == vol_id {
+                v["volume_full_threshold"] = serde_json::json!(threshold);
+            }
+        }
+        fs::write(&p, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    }
+    /// Spawn a `put` that PAUSES after Phase 1 (segment pushed, log not yet
+    /// committed) via the GITSTORAGE_PAUSE hook. Returns the running child so a
+    /// test can race another operation against the paused window.
+    fn spawn_put_paused(&self, name: &str, data: &[u8], point: &str, pause_ms: u64) -> Child {
+        let p = self.write_file(name, data);
+        bin(self.home())
+            .args(["put"])
+            .arg(&p)
+            .args(["--repo"])
+            .arg(self.repo())
+            .args(["--keyfile"])
+            .arg(self.keyfile())
+            .args(["--chunk-size", "64k"])
+            .env("GITSTORAGE_PAUSE", point)
+            .env("GITSTORAGE_PAUSE_MS", pause_ms.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawning paused put")
+    }
     /// Run `compact`, optionally forced, with per-invocation gate env overrides
     /// (set ONLY on the child process). Returns the Output (may be a crash).
     fn compact(&self, force: bool, crash: Option<&str>, env: &[(&str, &str)]) -> Output {
@@ -729,5 +776,137 @@ fn snapshot_read_after_compaction_fails_loudly_never_silently() {
     assert!(
         stderr.contains("missing") || stderr.contains("couldn't find") || stderr.contains("chunk"),
         "the failure must point at the missing data, got: {stderr}"
+    );
+}
+
+// ============ known-issue demonstration tests (see AGENTS.md) ================
+//
+// Each asserts the DESIRED, correct behavior for an open GitHub issue, so it
+// FAILS today and becomes the acceptance test when the issue is fixed. They are
+// #[ignore]d so `cargo test` stays green for what works; run the known-failing
+// set with `cargo test -- --ignored`.
+
+/// Issue #1 — compaction is not snapshot-aware. A snapshot pinned before a
+/// compaction that retired its data SHOULD remain readable. Fails today: the
+/// segments the snapshot references were destroyed by compaction.
+#[test]
+#[ignore = "issue #1: compaction is not snapshot-aware; a snapshot pinned before \
+            compaction of its data should stay readable but currently does not"]
+fn issue_1_snapshot_survives_compaction() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("store");
+    // v0 takes every write; v1 tiny; v2 spare.
+    let mut engine = open_multivol(&root, &[8 * MIB, 32 * 1024, 8 * MIB]);
+    for i in 0..4u64 {
+        engine
+            .put(&format!("f{i}.bin"), &varied_bytes(200 * 1024, 10 + i)[..])
+            .unwrap();
+    }
+    // Pin a snapshot of all four files.
+    let pin = engine.log_tip().unwrap().unwrap();
+
+    // Delete most and compact: v0 is retired and its segments destroyed.
+    for i in 0..3u64 {
+        engine.remove(&format!("f{i}.bin")).unwrap();
+    }
+    engine.compact(true).unwrap();
+
+    // DESIRED: the pinned snapshot still reconstructs f0 byte-identically.
+    let mut out = Vec::new();
+    let res = engine.get("f0.bin", &mut out, Some(&pin));
+    assert!(
+        res.is_ok(),
+        "issue #1: snapshot read after compaction should succeed, got {res:?}"
+    );
+    assert_eq!(out, varied_bytes(200 * 1024, 10));
+}
+
+/// Issue #4 — the index/log repository grows without bound. Checkpoints bound
+/// reader work but never reclaim ancestry, so the reachable log history grows
+/// with the number of transactions. A prunable log would keep it near one
+/// checkpoint window. Fails today.
+#[test]
+#[ignore = "issue #4: index/log repo grows without bound; checkpoints do not \
+            reclaim history and there is no safe prune protocol"]
+fn issue_4_log_history_is_prunable() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("store");
+    let mut engine = Engine::open(&root, Keys::new([12u8; 32]), Some(64 * 1024)).unwrap();
+    let interval = 8u32;
+    engine.set_checkpoint_interval(interval);
+
+    for i in 0..64u64 {
+        engine
+            .put(&format!("f{i}.bin"), &varied_bytes(8 * 1024, 500 + i)[..])
+            .unwrap();
+    }
+
+    // The reader walks the WHOLE reachable history from the tip.
+    let (checkpoints, deltas) = engine.txn_kind_counts().unwrap();
+    let reachable = checkpoints + deltas;
+
+    // DESIRED: reachable log history is bounded by ~2 checkpoint windows, not by
+    // the number of writes. Fails today (grows unbounded with the transactions).
+    assert!(
+        reachable <= 2 * interval as usize,
+        "issue #4: reachable log history should be bounded (~2 checkpoint windows \
+         = {}), but grew to {reachable} commits after 64 puts",
+        2 * interval
+    );
+}
+
+/// Issue #2 — an in-flight put (Phase-1 segment pushed, Phase-2 commit pending)
+/// whose volume a concurrent compaction destroys ends up committed but
+/// unreadable. A committed put must always be readable. Fails today.
+#[test]
+#[ignore = "issue #2: an in-flight put whose volume a concurrent compaction \
+            destroys commits successfully but its data is gone; committed data \
+            must always be readable"]
+fn issue_2_inflight_put_survives_concurrent_compaction() {
+    // Concentrate all writes on v0 (v1 tiny rejects real segments; v2 spare) so
+    // both the racing put and the compaction target v0.
+    let store = RemoteStore::init(3, 8 * MIB);
+    store.patch_threshold("v1", 32 * 1024);
+
+    // Prime v0: four files, remove three → >50% dead with one live chunk.
+    let payloads: Vec<Vec<u8>> = (0..4).map(|i| varied_bytes(64 * 1024, 800 + i)).collect();
+    for (i, p) in payloads.iter().enumerate() {
+        store.put(&format!("f{i}.bin"), p);
+    }
+    for i in 0..3 {
+        store.rm(&format!("f{i}.bin"));
+    }
+
+    // A put that pushes its segment to v0 then pauses before committing.
+    let late = varied_bytes(64 * 1024, 900);
+    let child = store.spawn_put_paused("late.bin", &late, "after-segment", 5000);
+    // Let it push its segment to v0 and enter the pause.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Meanwhile compact v0: rewrite the live chunk to the spare, retire and
+    // DESTROY v0 — including the paused put's uncommitted segment.
+    let c = store.compact(true, None, &[]);
+    assert!(
+        c.status.success(),
+        "compaction should succeed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
+
+    // The paused put resumes and commits its manifest (pointing at v0).
+    let out = child.wait_with_output().expect("waiting on paused put");
+    assert!(
+        out.status.success(),
+        "issue #2 setup: the racing put should still commit (it CASes onto the \
+         post-compaction tip); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // DESIRED: a committed file is always readable.
+    let got = store.get_output("late.bin");
+    assert!(
+        got.status.success(),
+        "issue #2: a committed put must remain readable, but its data was \
+         destroyed by the concurrent compaction: {}",
+        String::from_utf8_lossy(&got.stderr)
     );
 }

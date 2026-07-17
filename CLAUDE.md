@@ -7,6 +7,17 @@ A log-structured, content-addressed object store over git hosting backends.
 README.md carries the project's policy commitments — never contradict them
 (no unlimited storage, no auto repo-fleet expansion, no circumvention features).
 
+## Testing philosophy (HARD RULE — see AGENTS.md)
+**Every known issue MUST have a test that fails on it.** A green suite with open
+issues means the suite is inadequate. For each open issue (bug or documented
+limitation), write a test asserting the DESIRED behavior and mark it
+`#[ignore = "issue #N: ..."]` — so `cargo test` stays green for what works and
+`cargo test -- --ignored` runs the known-failing tests that pin every issue.
+Fixing an issue means deleting its `#[ignore]` (the test becomes the acceptance
+criterion). Keep a passing test for any safe-degradation behavior AND the ignored
+test for the correct behavior. Every issue links to its test; every ignored test
+names its issue. Spell out "Section N" in text — never the section-symbol char.
+
 ## Status
 - M0–M2 complete: FastCDC chunking, keyed convergent encryption (dedup
   survives sealing), fully opaque store repos.
