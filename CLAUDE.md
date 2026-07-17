@@ -98,7 +98,17 @@ each volume; remotes reached via the URL in config)
   `tests/mirror.rs` — M6: whole-store mirror is a complete independent replica +
   incremental re-mirror; `tests/fuzz.rs` — M6: bounded seeded fuzz of the
   untrusted-input parsers (never-panic + integrity); `examples/bench.rs` — M6:
-  one-command benchmark harness
+  one-command benchmark harness;
+  `tests/cli.rs` — CLI surface + error paths (edge-size files, missing/bad
+  inputs, init/keyfile validation, tip/stats, resurrection);
+  `tests/property.rs` — boundary-size roundtrips, deterministic dedup,
+  many-files+checkpoint stress. Backend primitives have unit tests in
+  src/backend.rs (cas_ref/read_ref/list_refs/scheme rejection).
+- Test suite: 97 tests (lib units + roundtrip/engine/backend/compaction/mirror/
+  fuzz/cli/property). Two known limitations are documented as DESIGN Open
+  Problems 7 (compaction not snapshot-aware — old snapshots fail LOUDLY after
+  compaction) and 8 (concurrent write during same-volume compaction is outside
+  the §13.1 single-writer model; M5's guard covers committed data, not in-flight).
 - `agent-docs/` — **local-only shared agent knowledge base. NEVER commit, stage,
   or push anything in it.** Read it before starting work; keep it updated as you
   work (decisions + why, findings, changes).

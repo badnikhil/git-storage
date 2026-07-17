@@ -704,4 +704,113 @@ mod tests {
         let err = RemoteBackend::open("http://nope", &tmp.path().join("m.git"), 0);
         assert!(err.is_err());
     }
+
+    #[test]
+    fn remote_open_accepts_supported_schemes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for (i, url) in ["file:///tmp/x.git", "https://h/o/r.git", "ssh://h/o/r.git"]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                RemoteBackend::open(url, &tmp.path().join(format!("m{i}.git")), 0).is_ok(),
+                "scheme should be accepted: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirror_repo_rejects_bad_scheme() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("s.git");
+        LocalBackend::open(&src).unwrap();
+        assert!(mirror_repo(&src, "http://nope/x.git").is_err());
+        assert!(mirror_repo(&src, "/plain/path").is_err());
+    }
+
+    /// A small helper: build a commit over a one-blob tree and return its oid.
+    fn a_commit(be: &LocalBackend, body: &[u8], msg: &str) -> String {
+        let blob = be.write_blob(body).unwrap();
+        let tree = be.write_tree(&[("aa/bb/obj".to_string(), blob)]).unwrap();
+        be.commit_tree(&tree, &[], msg).unwrap()
+    }
+
+    #[test]
+    fn cas_ref_creates_updates_and_rejects_stale() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let be = LocalBackend::open(&tmp.path().join("r.git")).unwrap();
+        let r = "refs/heads/x";
+
+        // Create: old = None succeeds only when the ref is absent.
+        let c1 = a_commit(&be, b"one", "c1");
+        assert!(be.cas_ref(r, &c1, None).unwrap(), "create must succeed");
+        assert_eq!(be.read_ref(r).unwrap(), Some(c1.clone()));
+
+        // Creating again with old = None must be rejected (the ref now exists).
+        let c2 = a_commit(&be, b"two", "c2");
+        assert!(
+            !be.cas_ref(r, &c2, None).unwrap(),
+            "create-when-exists must lose"
+        );
+        assert_eq!(be.read_ref(r).unwrap(), Some(c1.clone()), "value unchanged");
+
+        // Update with the correct expected old succeeds.
+        assert!(be.cas_ref(r, &c2, Some(&c1)).unwrap(), "matched CAS wins");
+        assert_eq!(be.read_ref(r).unwrap(), Some(c2.clone()));
+
+        // Update with a STALE expected old is rejected; value stays put.
+        let c3 = a_commit(&be, b"three", "c3");
+        assert!(
+            !be.cas_ref(r, &c3, Some(&c1)).unwrap(),
+            "stale expected-old must lose"
+        );
+        assert_eq!(
+            be.read_ref(r).unwrap(),
+            Some(c2),
+            "value unchanged after stale CAS"
+        );
+    }
+
+    #[test]
+    fn read_missing_ref_is_none_and_delete_removes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let be = LocalBackend::open(&tmp.path().join("r.git")).unwrap();
+        assert_eq!(be.read_ref("refs/heads/absent").unwrap(), None);
+
+        let c = a_commit(&be, b"x", "c");
+        be.set_ref("refs/heads/present", &c).unwrap();
+        assert_eq!(be.read_ref("refs/heads/present").unwrap(), Some(c));
+        be.delete_ref("refs/heads/present").unwrap();
+        assert_eq!(be.read_ref("refs/heads/present").unwrap(), None);
+    }
+
+    #[test]
+    fn list_refs_filters_by_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let be = LocalBackend::open(&tmp.path().join("r.git")).unwrap();
+        let c = a_commit(&be, b"x", "c");
+        be.set_ref("refs/segments/aa", &c).unwrap();
+        be.set_ref("refs/segments/bb", &c).unwrap();
+        be.set_ref("refs/heads/log", &c).unwrap();
+
+        let segs = be.list_refs("refs/segments/").unwrap();
+        assert_eq!(segs.len(), 2, "two segment refs: {segs:?}");
+        assert!(segs
+            .iter()
+            .all(|(name, _)| name.starts_with("refs/segments/")));
+        assert_eq!(be.list_refs("refs/heads/").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn local_backend_blob_roundtrips_through_a_segment_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let be = LocalBackend::open(&tmp.path().join("r.git")).unwrap();
+        let payload = b"ciphertext-bytes-\x00\x01\x02";
+        let blob = be.write_blob(payload).unwrap();
+        let tree = be.write_tree(&[("aa/bb/cid".to_string(), blob)]).unwrap();
+        let commit = be.commit_tree(&tree, &[], "seg").unwrap();
+        be.set_ref("refs/segments/s", &commit).unwrap();
+        let got = be.read_blob_at("refs/segments/s", "aa/bb/cid").unwrap();
+        assert_eq!(got, payload);
+    }
 }

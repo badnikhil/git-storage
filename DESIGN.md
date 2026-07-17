@@ -1163,6 +1163,35 @@ These are genuinely unresolved in v1 and are called out for future work.
    readers, or index-repo rotation treated like volume compaction) is unspecified
    and is required future spec work before long-lived stores are viable.
 
+7. **Compaction is not snapshot-aware.** A snapshot read pins a log commit and
+   promises an immutable view of that moment (Section 13.3). Compaction (Section 12),
+   however, rewrites live chunks and **destroys the retired volume**, so a
+   snapshot pinned *before* a compaction that touched its data can no longer be
+   read — the manifests at that commit reference now-deleted segments. This
+   surfaced during M6 test-hardening (`tests/compaction.rs::
+   snapshot_read_after_compaction_fails_loudly_never_silently`). The guarantee v1
+   makes is a **loud failure** (missing segment/chunk), never silent wrong data —
+   verified by that test. What v1 does NOT offer is durable time-travel across
+   compaction: snapshots are for short-lived consistent reads (read while a writer
+   advances the tip), not a retention/versioning policy. A snapshot-aware
+   compaction (pin-tracking with grace periods, or copy-forward of chunks live in
+   any pinned snapshot) is future work; it shares machinery with problem 6.
+
+8. **Concurrent write during compaction of the same volume is outside the v1
+   single-writer model.** The v1 concurrency model is a single logical writer,
+   CAS-serialized (Section 13.1). M5 hardens the *committed-data* case as
+   defense-in-depth: `commit_compaction` rebuilds its repoint set from the current
+   namespace on every CAS attempt and **aborts** if a racing writer committed data
+   to the retiring volume that this pass did not rewrite (no data loss for
+   committed files). It does NOT cover an *in-flight* write: a `put` whose Phase-1
+   segment has been pushed to volume V but whose Phase-2 CAS has not yet landed,
+   while a compaction retires and destroys V, can leave the put's eventual commit
+   referencing a destroyed segment. This is a sharp edge of running concurrent
+   writers against v1 (unsupported per Section 13.1), not a defect within the
+   supported model. A full fix (Phase-1 re-validation on rebase, or excluding
+   recently-written volumes from compaction) belongs with the optimistic-writer
+   work (problem 1 / Section 13.4).
+
 ---
 
 ## 19. Appendix A — Platform constraints as design inputs

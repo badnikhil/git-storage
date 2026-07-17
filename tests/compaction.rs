@@ -427,6 +427,31 @@ impl RemoteStore {
         );
         assert_eq!(fs::read(&out).unwrap(), expect, "{name} must round-trip");
     }
+    /// The current log tip commit (for pinning a snapshot).
+    fn tip(&self) -> String {
+        let out = run_ok(
+            bin(self.home())
+                .args(["tip", "--repo"])
+                .arg(self.repo())
+                .args(["--keyfile"])
+                .arg(self.keyfile()),
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+    /// `get name --at <commit>`, returning the raw Output (may fail).
+    fn get_at(&self, name: &str, at: &str) -> Output {
+        let out = self.tmp.path().join(format!("at-{name}"));
+        bin(self.home())
+            .args(["get", name, "--output"])
+            .arg(&out)
+            .args(["--repo"])
+            .arg(self.repo())
+            .args(["--keyfile"])
+            .arg(self.keyfile())
+            .args(["--at", at])
+            .output()
+            .expect("spawning git-storage get --at")
+    }
     /// Run `compact`, optionally forced, with per-invocation gate env overrides
     /// (set ONLY on the child process). Returns the Output (may be a crash).
     fn compact(&self, force: bool, crash: Option<&str>, env: &[(&str, &str)]) -> Output {
@@ -593,5 +618,116 @@ fn orphan_sweep_respects_safety_window() {
     assert!(
         store.segment_refs("v0").is_empty(),
         "orphan segment must be gone after a zero-window sweep"
+    );
+}
+
+// ===================== M5/M6 edge coverage (added) =============================
+
+/// Liveness is namespace-wide: a chunk shared by several files counts ONCE and
+/// stays live until the LAST referrer is removed (DESIGN §12.2). Two identical
+/// files share every chunk; removing one leaves them all live, removing both
+/// makes them all dead.
+#[test]
+fn shared_chunk_stays_live_until_all_referrers_removed() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("store");
+    let mut engine = open_multivol(&root, &[8 * MIB, 32 * 1024, 8 * MIB]);
+    let data = varied_bytes(200 * 1024, 55);
+
+    engine.put("a.bin", &data[..]).unwrap();
+    let after_a = vol_stat(&engine, "v0");
+    assert!(after_a.total > 0 && after_a.dead == 0);
+
+    // An identical file fully dedups: no new chunks, no new bytes, shared once.
+    let s = engine.put("b.bin", &data[..]).unwrap();
+    assert_eq!(s.new_chunks, 0, "identical content must fully dedup");
+    let after_b = vol_stat(&engine, "v0");
+    assert_eq!(
+        after_b.total, after_a.total,
+        "no new bytes for a shared file"
+    );
+    assert_eq!(after_b.live, after_a.live, "shared chunks counted once");
+    assert_eq!(after_b.dead, 0);
+
+    // Removing one referrer leaves the chunks live (b still references them).
+    engine.remove("a.bin").unwrap();
+    let after_rm_a = vol_stat(&engine, "v0");
+    assert_eq!(after_rm_a.dead, 0, "chunks shared with b must stay live");
+    assert_eq!(after_rm_a.live, after_a.live);
+
+    // Removing the last referrer makes every shared chunk dead.
+    engine.remove("b.bin").unwrap();
+    let after_rm_b = vol_stat(&engine, "v0");
+    assert_eq!(after_rm_b.live, 0, "no referrers left → all dead");
+    assert_eq!(after_rm_b.dead, after_rm_b.total);
+}
+
+/// Forcing compaction when nothing is dead is a clean no-op: the dead-ratio gate
+/// (which `force` never bypasses) blocks every volume, and the store is intact.
+#[test]
+fn compact_with_nothing_dead_is_a_clean_noop() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("store");
+    let mut engine = open_multivol(&root, &[8 * MIB, 32 * 1024, 8 * MIB]);
+    for i in 0..3u64 {
+        engine
+            .put(&format!("f{i}.bin"), &varied_bytes(100 * 1024, 70 + i)[..])
+            .unwrap();
+    }
+    let report = engine.compact(true).unwrap();
+    assert!(
+        report.compacted.is_empty(),
+        "nothing is >50% dead, so force must still compact nothing: {report:?}"
+    );
+    assert_eq!(report.orphans_swept, 0);
+
+    // Everything still reads back.
+    let mut out = Vec::new();
+    engine.get("f1.bin", &mut out, None).unwrap();
+    assert_eq!(out, varied_bytes(100 * 1024, 71));
+}
+
+/// KNOWN LIMITATION, locked as a SAFETY guarantee (DESIGN §13.3 vs §12): a
+/// snapshot pinned BEFORE a compaction that retired the volumes it references is
+/// no longer readable — compaction reclaims old versions. The guarantee we DO
+/// make is that such a read fails LOUDLY (missing segment/chunk), never returns
+/// silent wrong data. See DESIGN.md open problem (compaction is not
+/// snapshot-aware).
+#[test]
+fn snapshot_read_after_compaction_fails_loudly_never_silently() {
+    let store = RemoteStore::init(3, 8 * MIB); // v0,v1 writable; v2 spare
+    let payloads: Vec<Vec<u8>> = (0..4).map(|i| varied_bytes(16 * 1024, 700 + i)).collect();
+    for (i, p) in payloads.iter().enumerate() {
+        store.put(&format!("f{i}.bin"), p);
+    }
+    // Pin the tip BEFORE any deletion/compaction: a consistent snapshot of all 4.
+    let pin = store.tip();
+    assert!(
+        store.get_at("f0.bin", &pin).status.success(),
+        "snapshot read must work BEFORE compaction"
+    );
+
+    // Delete most and compact: live data moves to the spare, the source volumes
+    // are retired and destroyed (window 0 sweeps any leftover).
+    for i in 0..3 {
+        store.rm(&format!("f{i}.bin"));
+    }
+    let out = store.compact(true, None, &[("GITSTORAGE_ORPHAN_WINDOW_SECS", "0")]);
+    assert!(out.status.success(), "compaction itself must succeed");
+
+    // The current tip is fine (surviving file repointed to the spare)…
+    store.assert_get("f3.bin", &payloads[3]);
+
+    // …but reading at the OLD pinned snapshot references now-destroyed segments.
+    // It MUST fail loudly, never hand back wrong bytes.
+    let res = store.get_at("f0.bin", &pin);
+    assert!(
+        !res.status.success(),
+        "a snapshot read of compacted-away data must fail loudly, not silently"
+    );
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert!(
+        stderr.contains("missing") || stderr.contains("couldn't find") || stderr.contains("chunk"),
+        "the failure must point at the missing data, got: {stderr}"
     );
 }
