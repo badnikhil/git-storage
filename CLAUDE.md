@@ -28,7 +28,23 @@ README.md carries the project's policy commitments — never contradict them
   against RemoteBackend over file://. See agent-docs/milestone-4.md.
   PENDING: live Gitea promisor verdict (DESIGN Open Problem 3) + live GitHub run
   — both env-gated tests, skip cleanly (GITSTORAGE_GITEA_URL / GITSTORAGE_TOKEN).
-- Next: M5 (compaction + budget). See IMPLEMENTATION-PLAN.md.
+- M5 complete: THE LIFECYCLE. `rm` (logical delete) + `stats` (per-volume
+  live/dead/util). Byte accounting now comes wholly from the log — each txn
+  carries SegRec{vol,seg,bytes}, each ChunkRef carries clen — so stats/selection/
+  budget need ZERO segment fetches (fixes the M4 read-amp residual). Hysteresis-
+  gated compaction (§12.4: dead>50% AND util≥80% AND ≥24h; all env-tunable,
+  `compact --force` bypasses pressure+interval) with delete-only-after-CAS
+  (§12.3): content-derived rewrite segment id = idempotent crash redo; Compact
+  txn is the commit point; source repo destroyed ONLY after the CAS. Concurrency
+  guard: repoint rebuilt from current namespace each attempt, aborts if a racing
+  put left un-rewritten data on the retiring volume (no data loss). Spare slot is
+  the compaction dest (§15.5); slot reuse, never fleet growth. Orphan sweep with
+  safety window (§12.5, default 1h). Compaction crash matrix + churn guard +
+  budget wall + volume selection tested in tests/compaction.rs (11 tests, incl.
+  crash injection over file:// RemoteBackend). 61 tests total. See
+  agent-docs/milestone-5.md.
+- Next: M6 (hardening + polish: mirror, benchmarks, fuzzers, docs). See
+  IMPLEMENTATION-PLAN.md.
 
 ## Store layout (M4)
 config.json (declares volumes[] + index_url; both optional — absent = M3 local
@@ -60,7 +76,10 @@ each volume; remotes reached via the URL in config)
 - `tests/roundtrip.rs` — CLI tests; `tests/engine.rs` — crash matrix,
   snapshots, concurrency, checkpoints (each parameterized local + remote/file://);
   `tests/backend.rs` — M4: rate governor, budget wall, volume selection,
-  promisor probe/fallback, env-gated Gitea/GitHub live suites
+  promisor probe/fallback, env-gated Gitea/GitHub live suites;
+  `tests/compaction.rs` — M5: rm, compaction correctness + crash matrix (over
+  file://), churn guard (min-interval), orphan-sweep window, budget wall,
+  volume selection / spare exclusion
 - `agent-docs/` — **local-only shared agent knowledge base. NEVER commit, stage,
   or push anything in it.** Read it before starting work; keep it updated as you
   work (decisions + why, findings, changes).

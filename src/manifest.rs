@@ -19,6 +19,12 @@ pub struct ChunkRef {
     pub plaintext_hash: String,
     /// Plaintext length in bytes.
     pub len: u64,
+    /// Ciphertext length in bytes = the stored size of this chunk (M5). Enables
+    /// per-chunk live/dead accounting from the manifest alone (DESIGN §12.2)
+    /// without fetching segments. Defaults to 0 for pre-M5 manifests, which
+    /// simply fall back to segment-total accounting.
+    #[serde(default)]
+    pub clen: u64,
     /// Volume holding this chunk ("v0" until M5's multi-volume budget).
     pub vol: String,
     /// Segment (refs/segments/<seg>) whose tree contains the chunk.
@@ -67,6 +73,7 @@ mod tests {
                     id: "a".repeat(64),
                     plaintext_hash: "c".repeat(64),
                     len: 1024,
+                    clen: 512,
                     vol: "v0".into(),
                     seg: "1".repeat(32),
                 },
@@ -74,6 +81,7 @@ mod tests {
                     id: "b".repeat(64),
                     plaintext_hash: "d".repeat(64),
                     len: 210,
+                    clen: 128,
                     vol: "v0".into(),
                     seg: "1".repeat(32),
                 },

@@ -514,6 +514,18 @@ transaction:
 The transaction payload is encrypted with `manifest_key` (Section 8.7) — the backend must
 not read the namespace or placement metadata in cleartext.
 
+> **Implementation delta (M5, 2026-07-18).** The engine realizes the seal
+> record as `SegRec { vol, seg, bytes }` carried in every `Delta`, `Checkpoint`,
+> and `Compact` transaction, and each manifest `ChunkRef` gained a `clen`
+> (ciphertext length). Together these make the **log the single authority for
+> byte accounting**: `stats`, liveness/dead-ratio, volume selection, and the
+> budget wall all size a volume by summing seal records from the log —
+> **zero segment fetches** (closing the M4 read-amplification concern flagged in
+> agent-docs/milestone-4.md). A `Checkpoint` carries the full segment-size index
+> so a reader that starts at a checkpoint has complete accounting without
+> walking pre-checkpoint history. Pre-M5 manifests (clen absent) default to 0
+> and fall back cleanly. See `src/engine.rs` (`SegRec`, `load_full_state`).
+
 ### 8.3 Commit protocol (the two-phase discipline)
 
 A writer commits a transaction in two ordered phases:
@@ -809,6 +821,36 @@ references any chunk in it, so INV-1 holds throughout — a crash between steps 
 6 leaves a retired-in-manifest-but-still-present repository, harmlessly re-deletable
 on retry.
 
+> **Implementation delta (M5, 2026-07-18).** `Engine::compact` implements this
+> procedure over the `Backend` trait (so it runs identically on local and
+> file:// remotes; whole-repo "delete" = `Backend::destroy` + `recreate`).
+> Three points worth recording:
+>
+> 1. **Idempotent rewrite (crash-safe redo).** The rewrite segment's ID is
+>    *content-derived* — `BLAKE3(retiring_volume, sorted live chunk IDs)` — not
+>    random. A compaction that crashes after Phase 1 (rewrite) and re-runs
+>    reproduces the SAME `refs/segments/<id>`. Because the rewrite *commit* OID is
+>    not deterministic (its timestamp varies), the redo must NOT blindly
+>    re-`set_ref` — that would be a non-fast-forward push against the already
+>    present ref. Instead the redo checks whether the destination already has the
+>    segment ref and, if so, **reuses it** (its content is identical by
+>    construction), rewriting only when absent. This is the compaction analogue of
+>    the write path's content-addressed segment idempotency (Section 8.3).
+> 2. **The commit point is a `Compact` transaction** repointing every affected
+>    file to `(dest, new_seg)` and listing the retired volume. Its byte
+>    accounting drops the retired volume from the seg index on apply. The source
+>    repo is destroyed ONLY after this CAS lands (step 6). The crash matrix
+>    (`compact-after-rewrite` / `-before-cas` / `-after-cas` / `-before-delete`)
+>    is exercised in `tests/compaction.rs`: at every boundary a fresh process
+>    reads all live files byte-identical, and a follow-up compaction converges.
+> 3. **Concurrency guard (refinement beyond the v1 single-writer model,
+>    Section 13.1).** The repoint manifests are rebuilt from the *current*
+>    namespace on every CAS attempt. If a concurrent `put` placed data on the
+>    retiring volume that this pass did not rewrite, retiring the volume would
+>    destroy live bytes — so the pass **aborts** (leaves the source intact; its
+>    rewrite becomes a swept orphan) rather than lose data. Compaction is thus
+>    safe even against a racing writer, not only serialized against one.
+
 ### 12.4 Compaction policy — hysteresis (CRITICAL)
 
 Compaction MUST be **lazy** and gated by hysteresis so the system does not churn
@@ -829,6 +871,17 @@ signatures that trigger abuse detection**[^abuse] (Section 17), and (b) is bad e
 — every compaction rewrites live bytes, consuming push budget and bandwidth. Lazy
 compaction minimizes both. The three-gate hysteresis prevents oscillation (compact →
 frees space → falls below pressure → next write repopulates → compact again).
+
+> **Implementation delta (M5, 2026-07-18).** The three PROPOSED values are the
+> shipped defaults (`DEFAULT_DEAD_RATIO_GATE` 0.50, `DEFAULT_PRESSURE_UTIL_GATE`
+> 0.80, `DEFAULT_MIN_COMPACT_INTERVAL_SECS` 24 h). Compaction is **not** a
+> background thread — it fires only when `compact` is invoked and all gates pass.
+> All three (plus the orphan window, Section 12.5) are overridable via
+> `GITSTORAGE_*` env vars so tests drive the machinery deterministically;
+> operators leave them at the defaults. The CLI `compact --force` bypasses the
+> pressure and interval gates (never the dead-ratio gate, never the
+> delete-after-CAS ordering). The min-interval anti-churn gate is verified in
+> `tests/compaction.rs::churn_guard_min_interval_blocks_immediate_recompaction`.
 
 ### 12.5 Orphan sweep
 

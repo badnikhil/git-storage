@@ -120,6 +120,29 @@ enum Cmd {
         #[arg(long)]
         keyfile: PathBuf,
     },
+    /// Logically delete a stored file (DESIGN §12.1). The bytes are reclaimed
+    /// later by compaction; deleting an unknown name fails cleanly.
+    Rm {
+        /// Stored file name (as shown by `ls`).
+        name: String,
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        keyfile: PathBuf,
+    },
+    /// Reclaim dead bytes by compacting eligible volumes (DESIGN §12.3/12.4).
+    /// Hysteresis-gated: runs only when the dead-ratio, budget-pressure and
+    /// min-interval gates all pass (tunable via GITSTORAGE_* env for tests).
+    Compact {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        keyfile: PathBuf,
+        /// Ignore the min-interval and pressure gates; compact any volume whose
+        /// dead-ratio gate passes. (Never bypasses delete-after-CAS ordering.)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -176,6 +199,16 @@ fn main() -> Result<()> {
         Cmd::Ls { repo, keyfile, at } => ls(&repo, &keyfile, at.as_deref()),
         Cmd::Tip { repo, keyfile } => tip(&repo, &keyfile),
         Cmd::Stats { repo, keyfile } => stats(&repo, &keyfile),
+        Cmd::Rm {
+            name,
+            repo,
+            keyfile,
+        } => rm(&name, &repo, &keyfile),
+        Cmd::Compact {
+            repo,
+            keyfile,
+            force,
+        } => compact(&repo, &keyfile, force),
     }
 }
 
@@ -363,10 +396,19 @@ fn tip(repo: &Path, keyfile_path: &Path) -> Result<()> {
 fn stats(repo: &Path, keyfile_path: &Path) -> Result<()> {
     let engine = open_engine(repo, keyfile_path, None)?;
     println!("volumes:");
-    for (id, used, threshold, spare) in engine.volume_usage()? {
-        let tag = if spare { " [spare]" } else { "" };
-        let pct = used.saturating_mul(100) / threshold.max(1);
-        println!("  {id}{tag}: {used} / {threshold} bytes ({pct}% full)");
+    for v in engine.stats()? {
+        let tag = if v.spare { " [spare]" } else { "" };
+        let util = (v.utilization() * 100.0).round() as u64;
+        let dead = (v.dead_ratio() * 100.0).round() as u64;
+        println!(
+            "  {id}{tag}: {total} / {threshold} bytes ({util}% full) \
+             — live {live}, dead {deadb} ({dead}% dead)",
+            id = v.id,
+            total = v.total,
+            threshold = v.threshold,
+            live = v.live,
+            deadb = v.dead,
+        );
     }
     let notes = engine.read_path_notes();
     if notes.is_empty() {
@@ -376,6 +418,36 @@ fn stats(repo: &Path, keyfile_path: &Path) -> Result<()> {
         for (id, note) in notes {
             println!("  {id}: {note}");
         }
+    }
+    Ok(())
+}
+
+fn rm(name: &str, repo: &Path, keyfile_path: &Path) -> Result<()> {
+    let mut engine = open_engine(repo, keyfile_path, None)?;
+    engine.remove(name)?;
+    println!("removed {name} (bytes reclaimed later by compaction)");
+    Ok(())
+}
+
+fn compact(repo: &Path, keyfile_path: &Path, force: bool) -> Result<()> {
+    let mut engine = open_engine(repo, keyfile_path, None)?;
+    let report = engine.compact(force)?;
+    if report.compacted.is_empty() {
+        println!("no volume eligible for compaction (gates not met)");
+    } else {
+        for c in &report.compacted {
+            println!(
+                "compacted {vol}: {before} -> {after} bytes ({moved} live chunks moved to {dest})",
+                vol = c.volume,
+                before = c.bytes_before,
+                after = c.bytes_after,
+                moved = c.chunks_moved,
+                dest = c.dest_volume,
+            );
+        }
+    }
+    if report.orphans_swept > 0 {
+        println!("swept {} orphan segment(s)", report.orphans_swept);
     }
     Ok(())
 }
