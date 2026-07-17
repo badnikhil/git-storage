@@ -973,6 +973,20 @@ otherwise. The only honest use of erasure coding is **across independent backend
   the only configuration where erasure coding earns its complexity. Deferred to
   future work.
 
+> **Implementation delta (M6, 2026-07-18).** The whole-store mirror is
+> implemented: `Engine::mirror` (CLI `mirror`) pushes every volume and then the
+> index/log to an independent second set of git repos. Ordering is
+> data-before-manifest (volumes first, index last, §8.3) so the mirror's log
+> never references segments not yet mirrored. The push is `refs/*:refs/*`
+> `--force` from the source's local bare repo (remote-backed volumes are
+> `fetch`-completed into their mirror first), living in the backend layer's
+> `mirror_repo` with the same credential isolation as every other network git op
+> — no new network-git site outside `src/backend.rs`. The mirror is **ciphertext
+> only** (same opacity as the primary; the keyfile is not part of the store) and
+> **idempotent** (git sends only missing objects). Verified over `file://` in
+> `tests/mirror.rs`: a fresh store pointed at the mirror alone reads every file
+> back byte-identical. RS-coding across backends remains future work.
+
 ---
 
 ## 15. Repository budget enforcement
@@ -1240,6 +1254,28 @@ differentiator.
   bottleneck, so a C chunker adds FFI complexity and unsafe surface for zero gain.
 
 **Decision: Rust.** Locked in as of 2026-07-16.
+
+> **gitoxide decision (M6, 2026-07-18) — DEFER, with evidence.** M0–M6 shell out
+> to the `git` CLI (via `gitrepo.rs::Bare` and `backend.rs`). The M6 plan calls
+> for deciding, on evidence from M3–M5, whether to migrate object/packfile work
+> to in-process `gitoxide`. The evidence:
+> - **Throughput.** `examples/bench` measures put ≈ 30 MB/s vs get ≈ 200 MB/s on
+>   a local backend. The write gap is dominated by one `git hash-object`
+>   subprocess spawn per chunk — a real, measured shell-out cost. So the CLI
+>   *is* a throughput bottleneck on the write path (get, which batch-reads, is
+>   far less affected).
+> - **Fragility.** CAS-loss and non-fast-forward detection rely on matching git's
+>   stderr strings (M4 residual risk; M5 hit a real flaky non-fast-forward on
+>   compaction redo, since fixed). `gitoxide` would replace stderr-scraping with
+>   typed results.
+>
+> **Decision: defer, do not migrate in M6.** The migration is large (every object
+> op + the CAS/push/fetch surface), high-regression-risk against a now-green
+> crash/concurrency/compaction test suite, and correctness — not speed — was M6's
+> job. The evidence to justify it now *exists* and is recorded here; gitoxide is
+> the prime candidate for a post-v1 performance/robustness milestone. Batching
+> `hash-object` (a `--stdin-paths` / one-process-per-segment change within the
+> CLI approach) is a cheaper interim win identified by the same benchmark.
 
 ---
 

@@ -78,6 +78,12 @@ pub trait Backend: Send {
     /// Recreate empty after destroy (slot reuse, DESIGN.md Section 15.4).
     fn recreate(&mut self) -> Result<()>;
 
+    /// Mirror EVERY ref (and all reachable objects) of this backend's repo to an
+    /// independent target git URL (whole-store mirror, DESIGN.md Section 14.3).
+    /// Push-only + idempotent. The network push itself lives in [`mirror_repo`]
+    /// (this file), keeping ALL network git in the backend layer.
+    fn mirror_to(&self, target_url: &str) -> Result<()>;
+
     /// Observability: a short human-readable note about how this backend last
     /// served a read (e.g. the promisor-probe verdict). Local returns None.
     fn read_path_note(&self) -> Option<String> {
@@ -146,6 +152,10 @@ impl Backend for LocalBackend {
     fn recreate(&mut self) -> Result<()> {
         self.repo = Bare::open(&self.dir)?;
         Ok(())
+    }
+    fn mirror_to(&self, target_url: &str) -> Result<()> {
+        // A local bare repo already holds every object, so mirror it directly.
+        mirror_repo(&self.dir, target_url)
     }
 }
 
@@ -378,6 +388,22 @@ impl RemoteBackend {
         }
         self.fetch_ref_full(refname)
     }
+
+    /// Bring EVERY ref (and all objects) from the remote into the mirror — used
+    /// before mirroring a remote-backed volume to a second backend, so the copy
+    /// is complete even if reads had only promisor-fetched some blobs.
+    fn fetch_all_refs(&self) -> Result<()> {
+        let out =
+            self.net_git_retrying(&["fetch", "--quiet", "--force", &self.url, "refs/*:refs/*"])?;
+        if !out.status.success() {
+            bail!(
+                "git fetch refs/*:refs/* from {} failed: {}",
+                self.url,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Backend for RemoteBackend {
@@ -581,6 +607,13 @@ impl Backend for RemoteBackend {
         );
     }
 
+    fn mirror_to(&self, target_url: &str) -> Result<()> {
+        // Complete the local mirror first (reads may have only promisor-fetched
+        // some blobs), then push the whole thing to the independent target.
+        self.fetch_all_refs()?;
+        mirror_repo(&self.mirror_dir, target_url)
+    }
+
     fn read_path_note(&self) -> Option<String> {
         Some(match self.promisor_supported() {
             Some(true) => "promisor blob-by-OID fetch".to_string(),
@@ -588,6 +621,52 @@ impl Backend for RemoteBackend {
             None => "no read served yet".to_string(),
         })
     }
+}
+
+/// Mirror EVERY ref (and all reachable objects) of a local bare repo to an
+/// independent target git URL — the whole-store mirror primitive (DESIGN.md
+/// Section 14.3). Push-only and idempotent: git sends only objects the target
+/// lacks, so re-mirroring is cheap. `refs/*:refs/*` with `--force` makes the
+/// target converge on the source (the source is authoritative); it never
+/// deletes target refs, so a stale segment ref on the mirror is at worst
+/// harmless garbage (readers follow the log ref, which IS force-updated).
+///
+/// Credential isolation is identical to `RemoteBackend::net_git`: terminal
+/// prompts off, no credential helper, HTTPS auth ONLY from `GITSTORAGE_TOKEN`
+/// as a one-shot header. This is the single mirror entry point and it lives in
+/// the backend layer, honoring the "network git only in src/backend.rs" rule.
+pub fn mirror_repo(source_git_dir: &Path, target_url: &str) -> Result<()> {
+    if !(target_url.starts_with("file://")
+        || target_url.starts_with("https://")
+        || target_url.starts_with("ssh://"))
+    {
+        bail!("unsupported mirror target scheme: {target_url} (file://, https://, ssh:// only)");
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("--git-dir").arg(source_git_dir);
+    if target_url.starts_with("https://") {
+        if let Ok(token) = std::env::var("GITSTORAGE_TOKEN") {
+            cmd.arg("-c")
+                .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+        }
+    }
+    cmd.arg("-c").arg("credential.helper=");
+    cmd.args(["push", "--quiet", "--force", target_url, "refs/*:refs/*"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS");
+    let out = cmd
+        .output()
+        .with_context(|| format!("git push mirror to {target_url}"))?;
+    if !out.status.success() {
+        bail!(
+            "mirror push to {target_url} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Classify a git stderr as an HTTP 429 / secondary-rate-limit signal.

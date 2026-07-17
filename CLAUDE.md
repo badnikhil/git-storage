@@ -43,8 +43,22 @@ README.md carries the project's policy commitments — never contradict them
   budget wall + volume selection tested in tests/compaction.rs (11 tests, incl.
   crash injection over file:// RemoteBackend). 61 tests total. See
   agent-docs/milestone-5.md.
-- Next: M6 (hardening + polish: mirror, benchmarks, fuzzers, docs). See
-  IMPLEMENTATION-PLAN.md.
+- M6 complete: HARDENING + POLISH. Whole-store mirror to an INDEPENDENT backend
+  (Engine::mirror, CLI `mirror`; backend.rs::mirror_repo does the isolated
+  refs/*:refs/* push, volumes-before-index ordering; ciphertext-only; idempotent;
+  tests/mirror.rs opens a fresh store on the mirror alone and reads byte-identical).
+  Reproducible benchmark harness (examples/bench.rs, one command: `cargo run
+  --release --example bench` — put/get throughput, edit-dedup, chunk-size sweep;
+  numbers in agent-docs/milestone-6.md). Fuzz/robustness suite (tests/fuzz.rs, 6
+  targets: open_chunk/open_manifest/manifest-JSON never panic on garbage, seal↔open
+  roundtrip, single-bit-flip rejection, chunker reassembly on degenerate inputs).
+  gitoxide DEFERRED with recorded evidence (put ~30 MB/s is git-CLI-spawn bound;
+  stderr-scraping is fragile — but migration is large/high-risk, prime post-v1
+  target). README gained a user guide + threat-model section. 69 tests total.
+  See agent-docs/milestone-6.md.
+- v1 core COMPLETE (M0–M6). Remaining before a real v1 ship: live-host
+  validation (Gitea promisor verdict + GitHub smoke, both env-gated) and the
+  deferred items (gitoxide, log compaction / Open Problem 6, RS erasure coding).
 
 ## Store layout (M4)
 config.json (declares volumes[] + index_url; both optional — absent = M3 local
@@ -52,7 +66,8 @@ mode) · index.git (bare; the log) · volumes/v0.git … (local bare mirrors of
 each volume; remotes reached via the URL in config)
 
 ## M4 safety invariants (hard requirements)
-- Network git lives ONLY in RemoteBackend (src/backend.rs). Same isolation as
+- Network git lives ONLY in src/backend.rs — RemoteBackend AND the M6
+  `mirror_repo` primitive (the whole-store mirror push). Same isolation as
   Bare: GIT_TERMINAL_PROMPT=0, `-c credential.helper=` (disabled), no askpass,
   token via `-c http.extraHeader` for https:// ONLY, sourced only from
   GITSTORAGE_TOKEN — never on-disk creds/helpers.
@@ -79,7 +94,11 @@ each volume; remotes reached via the URL in config)
   promisor probe/fallback, env-gated Gitea/GitHub live suites;
   `tests/compaction.rs` — M5: rm, compaction correctness + crash matrix (over
   file://), churn guard (min-interval), orphan-sweep window, budget wall,
-  volume selection / spare exclusion
+  volume selection / spare exclusion;
+  `tests/mirror.rs` — M6: whole-store mirror is a complete independent replica +
+  incremental re-mirror; `tests/fuzz.rs` — M6: bounded seeded fuzz of the
+  untrusted-input parsers (never-panic + integrity); `examples/bench.rs` — M6:
+  one-command benchmark harness
 - `agent-docs/` — **local-only shared agent knowledge base. NEVER commit, stage,
   or push anything in it.** Read it before starting work; keep it updated as you
   work (decisions + why, findings, changes).

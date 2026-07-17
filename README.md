@@ -57,8 +57,13 @@ Core design ideas:
 
 ## Architecture sketch
 
-This is design-stage: the diagram below describes the *intended* shape, not a
-built system.
+The core is now **implemented** (milestones M0–M6): content-defined chunking,
+keyed convergent encryption, sealed segments over a CAS transaction log,
+pluggable backends (local, and remote git over the wire), compaction + budget
+enforcement, and a whole-store mirror. It is exercised end-to-end against local
+bare repos and over `file://` remotes; validation against live hosted providers
+(GitHub / a self-hosted Gitea) is the remaining, deliberately-gated step. The
+diagram below is the shape that exists, minus that live-host validation.
 
 ```
    file
@@ -94,6 +99,75 @@ built system.
 Envisioned interfaces come later: a **CLI + SDK with explicit sync semantics
 first**; a **FUSE** filesystem only as a cached / write-back *demo*, never as the
 primary interface.
+
+## Using it
+
+The tool is a single binary (`cargo build --release` → `target/release/git-storage`).
+Every command needs a `--keyfile`: the master key that encrypts the store. **Lose
+the keyfile and the store is unrecoverable** — there is no backdoor, by design.
+The keyfile is created (mode 0600) with a brand-new store and never regenerated
+for an existing one.
+
+```sh
+# Initialise a store with a fixed, operator-declared volume set.
+# file:// volumes are inited as bare repos; https:// (GitHub/Gitea) are created
+# via the control-plane REST API with GITSTORAGE_TOKEN, and ONLY the declared set.
+git-storage init --repo ./store --keyfile ./master.key \
+    --volume v0=file:///srv/git/v0.git \
+    --volume v1=file:///srv/git/v1.git \
+    --index-url file:///srv/git/index.git
+
+git-storage put ./photo.raw     --repo ./store --keyfile ./master.key   # store a file
+git-storage ls                  --repo ./store --keyfile ./master.key   # list (metadata is encrypted)
+git-storage get photo.raw --output ./out.raw --repo ./store --keyfile ./master.key
+git-storage rm  photo.raw       --repo ./store --keyfile ./master.key   # logical delete
+git-storage stats               --repo ./store --keyfile ./master.key   # per-volume live/dead/budget
+git-storage compact             --repo ./store --keyfile ./master.key   # reclaim dead space (gated)
+
+# Whole-store mirror to an INDEPENDENT backend for durability (ciphertext only):
+git-storage mirror --repo ./store --keyfile ./master.key \
+    --to-index file:///mnt/backup/index.git \
+    --to-volume v0=file:///mnt/backup/v0.git \
+    --to-volume v1=file:///mnt/backup/v1.git
+
+# Snapshot reads: pin a log commit and read the store as of that point.
+git-storage tip --repo ./store --keyfile ./master.key                 # -> <commit>
+git-storage ls  --repo ./store --keyfile ./master.key --at <commit>
+```
+
+A local store without a declared volume set (`git-storage put --repo ./store …`
+with no prior `init`) works too — it synthesises a single local volume, which is
+how the earlier milestones' stores keep working unchanged.
+
+Reproduce the throughput / dedup / chunk-size numbers with one command:
+`cargo run --release --example bench`.
+
+## Threat model — what the encryption protects (and what it does not)
+
+Encryption is **keyed convergent** (DESIGN.md §6.3): dedup still works within a
+store, and an outsider cannot confirm-a-guessed-file against it. Being honest
+about the boundaries:
+
+**Protects (against a backend that is honest-but-curious or fully hostile):**
+- **Content confidentiality.** Chunks are zstd-compressed then sealed with
+  XChaCha20-Poly1305; the backend sees only opaque ciphertext blobs.
+- **Metadata confidentiality.** File names, sizes, and chunk layout live in the
+  transaction log, which is itself encrypted — the backend cannot read the
+  namespace.
+- **Integrity / tamper-evidence.** Every chunk is content-addressed (BLAKE3 of
+  the ciphertext) and AEAD-tagged; a flipped bit or substituted blob fails
+  loudly on read, never returns wrong plaintext. (Fuzz-tested in `tests/fuzz.rs`.)
+
+**Does NOT protect:**
+- **The keyfile.** It is the whole ballgame; its custody is out of scope. Lose
+  it → data lost. Leak it → data exposed.
+- **Availability.** A backend can delete or withhold your repos. The **mirror**
+  (independent second backend) is the mitigation, not the encryption.
+- **Access-pattern / size side-channels.** The backend still sees blob sizes,
+  counts, and access timing. Chunk *boundaries* are hidden by a per-store
+  key-derived gear seed (§5.4), but coarse volume/segment sizes are observable.
+- **Cross-store correlation is intentionally impossible** (no cross-user dedup,
+  §7) — a non-goal turned into a privacy property, not a gap.
 
 ## Platform policy
 

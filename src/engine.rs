@@ -384,6 +384,44 @@ impl Engine {
             .collect()
     }
 
+    /// Whole-store mirror to an independent backend (DESIGN §14.3): push the
+    /// index/log and every volume to a second, independent set of git repos, so
+    /// the store survives the loss of the primary backend. Push-only and
+    /// idempotent (re-running mirrors only new objects). `volume_targets` must
+    /// name a target URL for EVERY declared volume — a partial mirror is not a
+    /// durable copy, so a missing target is refused. The mirror is ciphertext
+    /// only (same opacity as the primary); the keyfile is NOT part of the store.
+    pub fn mirror(
+        &self,
+        index_target: &str,
+        volume_targets: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        for v in &self.volumes {
+            if !volume_targets.contains_key(&v.id) {
+                bail!(
+                    "no mirror target for volume {:?} — a whole-store mirror needs \
+                     a target for every volume (got {} of {})",
+                    v.id,
+                    volume_targets.len(),
+                    self.volumes.len()
+                );
+            }
+        }
+        // Volumes (data) BEFORE the index (log) — the same data-before-manifest
+        // ordering as the write path (Section 8.3): at every instant the mirror's
+        // log only ever references segments already present on the mirror's
+        // volumes. If the mirror push is interrupted, the mirror's log tip is
+        // simply older than the primary's, never dangling.
+        for v in &self.volumes {
+            let target = &volume_targets[&v.id];
+            v.backend
+                .mirror_to(target)
+                .with_context(|| format!("mirroring volume {}", v.id))?;
+        }
+        self.index.mirror_to(index_target)?;
+        Ok(())
+    }
+
     /// Store a byte stream under `name`. Returns stats. Safe under concurrent
     /// writers: the log CAS serializes commits; losers rebase and retry.
     pub fn put<R: Read>(&self, name: &str, reader: R) -> Result<PutStats> {

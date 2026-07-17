@@ -143,6 +143,24 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Mirror the whole store (index + every volume) to an INDEPENDENT second
+    /// backend for durability (DESIGN §14.3). Push-only + idempotent; the mirror
+    /// is ciphertext only. Targets are provisioned exactly like `init` (file://
+    /// inited as bare repos; https:// created via control-plane REST with
+    /// GITSTORAGE_TOKEN; ssh:// assumed to exist). Needs a --to-volume for every
+    /// declared volume.
+    Mirror {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        keyfile: PathBuf,
+        /// Target URL for the index/log repo.
+        #[arg(long)]
+        to_index: String,
+        /// A volume's mirror target, `id=url`. Repeatable; one per volume.
+        #[arg(long = "to-volume", value_name = "ID=URL")]
+        to_volumes: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -209,6 +227,12 @@ fn main() -> Result<()> {
             keyfile,
             force,
         } => compact(&repo, &keyfile, force),
+        Cmd::Mirror {
+            repo,
+            keyfile,
+            to_index,
+            to_volumes,
+        } => mirror(&repo, &keyfile, &to_index, &to_volumes),
     }
 }
 
@@ -426,6 +450,28 @@ fn rm(name: &str, repo: &Path, keyfile_path: &Path) -> Result<()> {
     let mut engine = open_engine(repo, keyfile_path, None)?;
     engine.remove(name)?;
     println!("removed {name} (bytes reclaimed later by compaction)");
+    Ok(())
+}
+
+fn mirror(repo: &Path, keyfile_path: &Path, to_index: &str, to_volumes: &[String]) -> Result<()> {
+    let engine = open_engine(repo, keyfile_path, None)?;
+    // Provision file:// targets (init bare repos); https:// must pre-exist.
+    // This is the same control-plane discipline as `init` — no data-plane
+    // repo creation. `provision_volume` only creates local/file repos.
+    provision_volume(to_index, Host::Gitea, None).context("provisioning mirror index")?;
+    let mut targets = std::collections::BTreeMap::new();
+    for v in to_volumes {
+        let (id, url) = parse_volume_arg(v)?;
+        provision_volume(&url, Host::Gitea, None)
+            .with_context(|| format!("provisioning mirror volume {id}"))?;
+        targets.insert(id, url);
+    }
+    engine.mirror(to_index, &targets)?;
+    println!(
+        "mirrored store to {} volume target(s) + index {}",
+        targets.len(),
+        to_index
+    );
     Ok(())
 }
 
