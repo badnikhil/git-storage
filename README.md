@@ -45,11 +45,16 @@ Core design ideas:
 
 ## What this is NOT
 
-- ❌ **Not an "unlimited free cloud drive."** There is a fixed, user-declared
-  repository budget. The system will not silently grow beyond it.
-- ❌ **Not automated repo-fleet expansion.** It does **not** spin up new
-  repositories on the fly to dodge per-repo size limits. The repo budget is
-  declared by you, up front, and stays fixed.
+- ❌ **Not an "unlimited free cloud drive."** There is always a fixed,
+  **user-declared ceiling** (a total budget / max repo count). The system never
+  grows beyond it — when the ceiling is reached, writes are refused, full stop.
+- ⚙️ **No *unbounded* auto-expansion.** Today the repository set is fixed at
+  `init` and does not auto-grow. A **planned** feature (see *Status and what's
+  left*) will let the already-authorized CLI **auto-provision volumes within your
+  declared ceiling** — and split a large file's chunks across them — so a file
+  bigger than one repo can be stored. It stays **bounded** (never past the
+  ceiling) and **rate-limited** (no high-frequency repo churn); it is fleet
+  management inside a budget you set, not a path to unlimited storage.
 - ❌ **Not a circumvention tool.** Any feature whose *purpose* is to evade a
   provider's quotas, rate limits, or file-size limits is out of scope by design.
 - ❌ **Not a backup product.** See GitHub's own guidance: "Git is not designed to
@@ -178,6 +183,25 @@ enforcement, and a whole-store mirror. 97 tests (unit + integration + fuzz),
 green against local bare repos and `file://` remotes; `cargo clippy -D warnings`
 and `cargo fmt --check` clean.
 
+**Planned capability — large files that span repos (a project goal):**
+
+Today one `put` writes a single segment that must fit one declared volume, so a
+file larger than one repo is refused (the budget wall fires even if the *total*
+declared budget could hold it). Two changes, together, make a large file (say
+50 GB) spread across repos:
+
+1. **Segment splitting.** Seal a file into multiple bounded (~512 MiB) segments
+   and place each one independently across volumes — streaming, not buffering the
+   whole file in memory.
+2. **Authorized, bounded auto-provisioning.** The CLI is already authorized with
+   your token; when the declared volumes fill, it may **create additional volume
+   repos and continue placing the remaining chunks there** — but only within a
+   **user-declared ceiling** (max repos / total budget) and **rate-limited** to
+   respect host push/creation limits. At the ceiling, the budget wall still
+   refuses. This keeps "not unlimited" (the ceiling is hard) and "no high-frequency
+   repo churn" (rate-limited), while removing the "one file can't exceed one repo"
+   limit. Tracked as a goal in the issue tracker; not built yet.
+
 **Remaining before this is a real v1 you'd trust with data:**
 
 - **Live-host validation (the biggest gap).** Everything is proven over
@@ -214,6 +238,7 @@ The authoritative list is **DESIGN.md Section 18**. The ones a user should know 
 | 6 | Index/log repo grows unbounded | No safe prune protocol yet; blocks long-lived stores | [#4](https://github.com/badnikhil/git-storage/issues/4) |
 | 7 | Compaction is not snapshot-aware | A snapshot pinned before a compaction that retired its data becomes unreadable — **guaranteed to fail loudly, never silent wrong data** (locked by a test) | [#1](https://github.com/badnikhil/git-storage/issues/1) |
 | 8 | Concurrent write during same-volume compaction | Outside the v1 single-writer model; committed data is protected, an in-flight write is not | [#2](https://github.com/badnikhil/git-storage/issues/2) |
+| 15.3 | Large files don't span repos (goal) | One put = one segment that must fit one volume; a file bigger than a volume is refused. Planned: segment splitting + bounded authorized auto-provisioning | [#6](https://github.com/badnikhil/git-storage/issues/6) |
 
 Plus [#5](https://github.com/badnikhil/git-storage/issues/5): evaluate a `gitoxide`
 migration for the object/CAS path (post-v1 performance + robustness).

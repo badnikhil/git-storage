@@ -86,6 +86,12 @@ each volume; remotes reached via the URL in config)
   init-only, control-plane-only (provision.rs). Never let it into RemoteBackend.
 - Budget wall: never overflow a volume, never create repos to make room — a
   write with no accepting volume is REFUSED ("budget exhausted").
+- PLANNED (goal, not built — GitHub issue #6, DESIGN Section 15.3 "Planned
+  evolution"): large-file segment splitting + BOUNDED authorized auto-provisioning
+  (the CLI may control-plane-create a new volume within a USER-DECLARED CEILING,
+  rate-limited). Until it lands, the two invariants above hold exactly as written.
+  When it lands: creation stays control-plane-only + rate-limited + ceiling-bounded
+  (never data-plane, never unlimited, never high-frequency churn).
 
 ## Git safety rules (hard requirements)
 - The CLI performs LOCAL git ops only (init/add/diff/commit). Never add a

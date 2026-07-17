@@ -1014,6 +1014,30 @@ sufficient space under its hysteresis gates, the system **MUST refuse the write*
 with a clear "budget exhausted" error. It MUST NOT create a new repository to absorb
 the overflow. This refusal is the mechanism that makes "not unlimited storage" true.
 
+> **Planned evolution (goal, 2026-07-18) — large files that span repos.** Two
+> current facts combine into a real limitation: (a) the implementation makes ONE
+> segment per `put` (no mid-file sealing yet — Section 3.2's 512 MiB target is not
+> enforced), and (b) a segment must fit ONE volume. So a file larger than a single
+> volume is refused even when the *total* declared budget could hold it. The goal
+> is to remove this in two steps:
+>
+> 1. **Segment splitting.** Seal a file into multiple bounded (~512 MiB) segments
+>    (Section 3.2 / 9.4) and place each independently via Section 9.3 — streaming, not
+>    buffering the whole file. This alone lets a large file spread across the
+>    *declared* volumes.
+> 2. **Bounded, authorized auto-provisioning.** Relax "the declared set never
+>    grows automatically" (Section 15.1) to: within a **user-declared ceiling**
+>    (max repos / total budget), the authorized CLI MAY control-plane-provision a
+>    NEW volume repo and place the remaining chunks there, then continue. This
+>    stays honest only if it keeps the anti-abuse guarantees of Section 17:
+>    **rate-limited** creation (no high-frequency create/delete churn), each new
+>    repo substantially used before the next, and a **hard ceiling** past which
+>    the budget wall above still fires. "Not unlimited" survives as the ceiling;
+>    what changes is that growth *up to* the ceiling can be automatic instead of a
+>    manual reconfiguration. The data-plane/control-plane split (Section 16) is
+>    preserved: provisioning stays a control-plane action, just one the CLI may now
+>    invoke mid-life under the ceiling, not only at `init`.
+
 ### 15.4 Slot reuse is not fleet expansion
 
 When compaction retires a volume (Section 12.3 step 6), its **declared slot** may be

@@ -358,6 +358,44 @@ for a fixed budget; docs current; all suites green on local-bare + Gitea.
 
 ---
 
+## M7 (future goal) — large files that span repos
+
+**Goal:** a file larger than one volume can be stored, spread across the volume
+set, and — within a user-declared ceiling — across repos the CLI provisions on
+demand. Removes today's "one put = one segment = must fit one volume" limit
+(GitHub issue #6; DESIGN.md Section 15.3 "Planned evolution").
+
+**In scope**
+- **Segment splitting.** Seal a file into multiple bounded (~512 MiB) segments
+  (DESIGN Section 3.2 / 9.4 seal triggers) and place each independently via volume
+  selection (Section 9.3). Stream the file — never buffer the whole thing in RAM.
+- **Bounded, authorized auto-provisioning.** The CLI is authorized with the
+  user's token; when the declared volumes fill, it MAY control-plane-provision a
+  new volume repo and place the remaining chunks there — but only within a
+  **user-declared ceiling** (max repos / total budget) and **rate-limited**
+  (respect host push/create limits; no high-frequency repo churn; substantial use
+  per repo before the next). At the ceiling, the budget wall (Section 15.3) still
+  refuses.
+
+**Explicitly NOT in scope / invariants preserved:** unlimited storage (the
+ceiling is hard); high-frequency create/delete churn (Section 17); data-plane repo
+creation (provisioning stays control-plane, Section 16 — the CLI just may invoke it
+mid-life under the ceiling, not only at `init`); circumvention of a provider's
+documented limits.
+
+**Exit criteria**
+1. A file larger than any single volume stores + reads back byte-identical,
+   spread across multiple volumes (segment splitting), with bounded memory.
+2. With auto-provisioning enabled and a ceiling of N repos, a store that fills
+   its declared volumes provisions new ones up to N, then refuses at N (budget
+   wall) — provisioning observably rate-limited.
+3. The failing test from issue #6 (large file across small volumes) passes; the
+   `#[ignore]` is removed.
+
+**DESIGN.md sections:** 3.2, 9.3/9.4, 15.1/15.3, 16, 17. **Size: L.**
+
+---
+
 ## Sequencing and parallelism
 
 ```

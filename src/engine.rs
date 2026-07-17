@@ -438,10 +438,17 @@ impl Engine {
             }
         }
 
-        // Chunk + seal, BUFFERING new ciphertext in memory. We must know the
-        // segment's total size before choosing a volume (budget wall needs the
-        // projected size), and where the segment lands before writing blobs.
-        // Segments are bounded (≈512 MiB target), so buffering is acceptable.
+        // Chunk + seal, BUFFERING all new ciphertext in memory. We need the
+        // segment's total size before choosing a volume (the budget wall needs
+        // the projected size) and the destination before writing blobs.
+        //
+        // LIMITATION (GitHub issue #6): this makes ONE segment per put, holding
+        // the whole file, and that segment must fit ONE volume. Section 3.2's
+        // 512 MiB seal target is NOT enforced here, so a file larger than a
+        // single volume is refused (budget wall) and a huge file buffers in RAM.
+        // The planned fix is segment splitting (seal at a size cap, place each
+        // segment independently) + bounded authorized auto-provisioning — see
+        // DESIGN.md Section 15.3 "Planned evolution".
         let seg_id = random_id();
         struct StagedChunk {
             chunk_id: String,

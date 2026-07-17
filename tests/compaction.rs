@@ -910,3 +910,31 @@ fn issue_2_inflight_put_survives_concurrent_compaction() {
         String::from_utf8_lossy(&got.stderr)
     );
 }
+
+/// Issue #6 — a file larger than any single volume is refused, even when the
+/// TOTAL declared budget could hold it. It SHOULD split across volumes (segment
+/// splitting) instead of hitting the budget wall. Fails today: one put makes one
+/// unbounded segment that must fit one volume.
+#[test]
+#[ignore = "issue #6: large files aren't split across volumes; one put = one \
+            unbounded segment that must fit a single volume"]
+fn issue_6_large_file_spreads_across_volumes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("store");
+    // Two small writable volumes (150 KiB each = 300 KiB budget) + spare.
+    let engine = open_multivol(&root, &[150 * 1024, 150 * 1024, 8 * MIB]);
+
+    // 250 KiB: bigger than any single volume, smaller than the total writable
+    // budget. DESIRED: spreads across v0+v1. Today: refused by the budget wall.
+    let data = varied_bytes(250 * 1024, 606);
+    let res = engine.put("big.bin", &data[..]);
+    assert!(
+        res.is_ok(),
+        "issue #6: a file within the total budget should store by spreading \
+         across volumes, got {res:?}"
+    );
+
+    let mut out = Vec::new();
+    engine.get("big.bin", &mut out, None).unwrap();
+    assert_eq!(out, data, "the spread-across-volumes file must round-trip");
+}
