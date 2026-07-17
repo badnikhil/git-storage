@@ -208,12 +208,15 @@ demo at most, never the primary interface).
 
 The authoritative list is **DESIGN.md §18**. The ones a user should know about:
 
-| # | Problem | Current guarantee / status |
-|---|---------|----------------------------|
-| 3 | Gitea/Forgejo promisor fetch unverified | Mechanism + fallback implemented; **live verdict pending** |
-| 6 | Index/log repo grows unbounded | No safe prune protocol yet; blocks long-lived stores |
-| 7 | Compaction is not snapshot-aware | A snapshot pinned before a compaction that retired its data becomes unreadable — **guaranteed to fail loudly, never silent wrong data** (locked by a test) |
-| 8 | Concurrent write during same-volume compaction | Outside the v1 single-writer model; committed data is protected, an in-flight write is not |
+| DESIGN §18 | Problem | Current guarantee / status | Issue |
+|---|---------|----------------------------|-------|
+| 3 | Gitea/Forgejo promisor fetch unverified | Mechanism + fallback implemented; **live verdict pending** | [#3](https://github.com/badnikhil/git-storage/issues/3) |
+| 6 | Index/log repo grows unbounded | No safe prune protocol yet; blocks long-lived stores | [#4](https://github.com/badnikhil/git-storage/issues/4) |
+| 7 | Compaction is not snapshot-aware | A snapshot pinned before a compaction that retired its data becomes unreadable — **guaranteed to fail loudly, never silent wrong data** (locked by a test) | [#1](https://github.com/badnikhil/git-storage/issues/1) |
+| 8 | Concurrent write during same-volume compaction | Outside the v1 single-writer model; committed data is protected, an in-flight write is not | [#2](https://github.com/badnikhil/git-storage/issues/2) |
+
+Plus [#5](https://github.com/badnikhil/git-storage/issues/5): evaluate a `gitoxide`
+migration for the object/CAS path (post-v1 performance + robustness).
 
 ## Platform policy
 
