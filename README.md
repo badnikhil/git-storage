@@ -169,6 +169,52 @@ about the boundaries:
 - **Cross-store correlation is intentionally impossible** (no cross-user dedup,
   §7) — a non-goal turned into a privacy property, not a gap.
 
+## Status and what's left
+
+**Done — the v1 core (milestones M0–M6).** Content-defined chunking, keyed
+convergent encryption, sealed segments over a CAS transaction log, a pluggable
+backend trait (local + remote git over the wire), compaction + budget
+enforcement, and a whole-store mirror. 97 tests (unit + integration + fuzz),
+green against local bare repos and `file://` remotes; `cargo clippy -D warnings`
+and `cargo fmt --check` clean.
+
+**Remaining before this is a real v1 you'd trust with data:**
+
+- **Live-host validation (the biggest gap).** Everything is proven over
+  `file://`, which exercises the same git send-pack/receive-pack path but not a
+  real provider. Two things are written and env-gated but never run here: the
+  **Gitea promisor-fetch verdict** (does partial-clone blob-by-OID work on
+  Gitea/Forgejo, or does the read path fall back to full-segment fetch?) and a
+  **GitHub smoke test**. Until these run, "works on real hosts" is unproven.
+- **Known limitations surfaced by the test suite** (see *Open problems* below and
+  the issue tracker): compaction is not snapshot-aware; concurrent writing during
+  compaction of the same volume is outside the single-writer model.
+- **Index/log repository grows without bound.** Checkpoints bound *reader* work
+  but never reclaim log history; there is no safe prune protocol yet (pruning is
+  a non-fast-forward update, which breaks the CAS model). Long-lived stores need
+  this solved (DESIGN.md open problem 6).
+- **`gitoxide` migration (deferred, with evidence).** Write throughput is bound
+  by one `git hash-object` process per chunk (see `cargo run --release --example
+  bench`), and race detection scrapes git's stderr. Both argue for in-process
+  gitoxide, but the migration is large and high-risk against a green test suite,
+  so it's the prime post-v1 milestone, not v1 work.
+
+**Explicitly deferred to future work (non-goals for v1):** Reed–Solomon erasure
+coding *across independent backends* (the only honest EC configuration),
+optimistic multi-writer conflict resolution, and a FUSE filesystem (a cached
+demo at most, never the primary interface).
+
+### Open problems (current, tracked as GitHub issues)
+
+The authoritative list is **DESIGN.md §18**. The ones a user should know about:
+
+| # | Problem | Current guarantee / status |
+|---|---------|----------------------------|
+| 3 | Gitea/Forgejo promisor fetch unverified | Mechanism + fallback implemented; **live verdict pending** |
+| 6 | Index/log repo grows unbounded | No safe prune protocol yet; blocks long-lived stores |
+| 7 | Compaction is not snapshot-aware | A snapshot pinned before a compaction that retired its data becomes unreadable — **guaranteed to fail loudly, never silent wrong data** (locked by a test) |
+| 8 | Concurrent write during same-volume compaction | Outside the v1 single-writer model; committed data is protected, an in-flight write is not |
+
 ## Platform policy
 
 `git-storage`'s primary target is **self-hosted git servers, where the operator
