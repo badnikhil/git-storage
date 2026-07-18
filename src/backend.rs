@@ -242,11 +242,13 @@ impl RemoteBackend {
         let mut cmd = Command::new("git");
         cmd.arg("--git-dir").arg(self.mirror_dir.as_path());
         // Token auth (real hosts): a single extraHeader for this invocation
-        // only. No credential helpers, ever.
+        // only. No credential helpers, ever. HTTP Basic (token as the username,
+        // empty password) — the form git-over-HTTPS accepts on BOTH GitHub and
+        // Gitea. (Bearer works for the REST control plane, provision.rs, but NOT
+        // for git-over-HTTPS on GitHub, which returns a 401 → prompt.)
         if self.url.starts_with("https://") {
             if let Ok(token) = std::env::var("GITSTORAGE_TOKEN") {
-                cmd.arg("-c")
-                    .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+                cmd.arg("-c").arg(basic_auth_header(&token));
             }
         }
         // Belt-and-suspenders: explicitly disable any credential helper the
@@ -646,8 +648,7 @@ pub fn mirror_repo(source_git_dir: &Path, target_url: &str) -> Result<()> {
     cmd.arg("--git-dir").arg(source_git_dir);
     if target_url.starts_with("https://") {
         if let Ok(token) = std::env::var("GITSTORAGE_TOKEN") {
-            cmd.arg("-c")
-                .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+            cmd.arg("-c").arg(basic_auth_header(&token));
         }
     }
     cmd.arg("-c").arg("credential.helper=");
@@ -667,6 +668,41 @@ pub fn mirror_repo(source_git_dir: &Path, target_url: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The `-c http.extraHeader=...` value that authenticates git-over-HTTPS with a
+/// token via HTTP Basic (token as the username, empty password) — the form
+/// accepted by BOTH GitHub and Gitea's git endpoints. (`Bearer` is correct for
+/// the REST control plane in provision.rs, but GitHub's git-over-HTTPS rejects
+/// it.) The base64 is Basic-auth framing, not secrecy; like any `-c` argument it
+/// is visible in the process list — the same exposure the Bearer form had.
+fn basic_auth_header(token: &str) -> String {
+    let creds = base64_encode(format!("{token}:").as_bytes());
+    format!("http.extraHeader=Authorization: Basic {creds}")
+}
+
+/// Minimal standard base64 (RFC 4648) — avoids pulling in a crate for one header.
+fn base64_encode(input: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = ((chunk[0] as u32) << 16) | (b1 << 8) | b2;
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Classify a git stderr as an HTTP 429 / secondary-rate-limit signal.
@@ -696,6 +732,22 @@ mod tests {
         assert!(is_rate_limited("error: 429 Too Many Requests"));
         assert!(is_rate_limited("You have exceeded a secondary rate limit"));
         assert!(!is_rate_limited("fatal: repository not found"));
+    }
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn basic_auth_header_is_token_as_username() {
+        // "tok:" base64 = "dG9rOg==". Header must be Basic (not Bearer).
+        let h = basic_auth_header("tok");
+        assert_eq!(h, "http.extraHeader=Authorization: Basic dG9rOg==");
     }
 
     #[test]
