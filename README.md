@@ -49,8 +49,7 @@ Core design ideas:
   **user-declared ceiling** (a total budget / max repo count). The system never
   grows beyond it — when the ceiling is reached, writes are refused, full stop.
 - ⚙️ **No *unbounded* auto-expansion.** Today the repository set is fixed at
-  `init` and does not auto-grow. A **planned** feature (see *Status and what's
-  left*) will let the already-authorized CLI **auto-provision volumes within your
+  `init` and does not auto-grow. A **planned** feature  will let the already-authorized CLI **auto-provision volumes within your
   declared ceiling** — and split a large file's chunks across them — so a file
   bigger than one repo can be stored. It stays **bounded** (never past the
   ceiling) and **rate-limited** (no high-frequency repo churn); it is fleet
@@ -203,22 +202,7 @@ declared budget could hold it). Two changes, together, make a large file (say
    refuses. This keeps "not unlimited" (the ceiling is hard) and "no high-frequency
    repo churn" (rate-limited), while removing the "one file can't exceed one repo"
    limit. Tracked as a goal in the issue tracker; not built yet.
-
-**Remaining before this is a real v1 you'd trust with data:**
-
-- **Live-host validation (the biggest gap).** Everything is proven over
-  `file://`, which exercises the same git send-pack/receive-pack path but not a
-  real provider. Two things are written and env-gated but never run here: the
-  **Gitea promisor-fetch verdict** (does partial-clone blob-by-OID work on
-  Gitea/Forgejo, or does the read path fall back to full-segment fetch?) and a
-  **GitHub smoke test**. Until these run, "works on real hosts" is unproven.
-- **Known limitations surfaced by the test suite** (see *Open problems* below and
-  the issue tracker): compaction is not snapshot-aware; concurrent writing during
-  compaction of the same volume is outside the single-writer model.
-- **Index/log repository grows without bound.** Checkpoints bound *reader* work
-  but never reclaim log history; there is no safe prune protocol yet (pruning is
-  a non-fast-forward update, which breaks the CAS model). Long-lived stores need
-  this solved (DESIGN.md open problem 6).
+   
 - **`gitoxide` migration (deferred, with evidence).** Write throughput is bound
   by one `git hash-object` process per chunk (see `cargo run --release --example
   bench`), and race detection scrapes git's stderr. Both argue for in-process
@@ -229,21 +213,6 @@ declared budget could hold it). Two changes, together, make a large file (say
 coding *across independent backends* (the only honest EC configuration),
 optimistic multi-writer conflict resolution, and a FUSE filesystem (a cached
 demo at most, never the primary interface).
-
-### Open problems (current, tracked as GitHub issues)
-
-The authoritative list is **DESIGN.md Section 18**. The ones a user should know about:
-
-| DESIGN Section 18 | Problem | Current guarantee / status | Issue |
-|---|---------|----------------------------|-------|
-| 3 | Gitea/Forgejo promisor fetch unverified | Mechanism + fallback implemented; **live verdict pending** | [#3](https://github.com/badnikhil/git-storage/issues/3) |
-| 6 | Index/log repo grows unbounded | No safe prune protocol yet; blocks long-lived stores | [#4](https://github.com/badnikhil/git-storage/issues/4) |
-| 7 | Compaction is not snapshot-aware | A snapshot pinned before a compaction that retired its data becomes unreadable — **guaranteed to fail loudly, never silent wrong data** (locked by a test) | [#1](https://github.com/badnikhil/git-storage/issues/1) |
-| 8 | Concurrent write during same-volume compaction | Outside the v1 single-writer model; committed data is protected, an in-flight write is not | [#2](https://github.com/badnikhil/git-storage/issues/2) |
-| 15.3 | Large files don't span repos (goal) | One put = one segment that must fit one volume; a file bigger than a volume is refused. Planned: segment splitting + bounded authorized auto-provisioning | [#6](https://github.com/badnikhil/git-storage/issues/6) |
-
-Plus [#5](https://github.com/badnikhil/git-storage/issues/5): evaluate a `gitoxide`
-migration for the object/CAS path (post-v1 performance + robustness).
 
 ## Platform policy
 
