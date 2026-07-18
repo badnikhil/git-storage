@@ -15,12 +15,13 @@ ln -sf "$PWD/target/release/git-storage" ~/.local/bin/git-storage
 ## 30 seconds
 
 ```sh
-git-storage put photo.jpg  --repo ./store --keyfile ./key          # store a file
-git-storage get photo.jpg  --output copy.jpg --repo ./store --keyfile ./key   # get it back
+git-storage put photo.jpg  --repo ./store --keyfile ./key   # store a file
+git-storage get photo.jpg  --repo ./store --keyfile ./key   # get it back (writes ./photo.jpg)
 ```
 
 The first `put` creates the store folder and the keyfile. Every command takes
-`--repo` (the store) and `--keyfile`.
+`--repo` (the store) and `--keyfile`. `get` writes to the stored name by
+default; add `--output <path>` only if you want it somewhere else.
 
 > **Keep the keyfile safe.** Lose it and the data is gone — there is no recovery.
 
@@ -29,7 +30,7 @@ The first `put` creates the store folder and the keyfile. Every command takes
 | Command | What it does |
 |---|---|
 | `put <file>` | Store a file |
-| `get <name> --output <path>` | Reconstruct a file (verifies every byte) |
+| `get <name>` | Reconstruct a file to `./<name>` (verifies every byte); `--output <path>` to write elsewhere |
 | `ls` | List stored files |
 | `rm <name>` | Delete a file (space reclaimed by `compact`) |
 | `stats` | Per-volume usage: live / dead / budget |

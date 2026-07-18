@@ -124,6 +124,32 @@ fn empty_file_roundtrips() {
     assert_eq!(fs::read(&out).unwrap(), b"", "empty file must round-trip");
 }
 
+/// `get` with no `--output` writes to the stored name in the current directory.
+#[test]
+fn get_defaults_output_to_the_stored_name() {
+    let fx = Local::new();
+    let data = varied_bytes(40 * 1024, 9);
+    let input = fx.path("report.bin");
+    fs::write(&input, &data).unwrap();
+    fx.put(&input);
+    fs::remove_file(&input).unwrap(); // delete the original
+
+    // `get report.bin` (no --output) must recreate ./report.bin. Run it from
+    // the sandbox home so the relative default lands in a known place.
+    let out = run(bin(fx.home())
+        .current_dir(fx.home())
+        .args(["get", "report.bin", "--repo"])
+        .arg(fx.repo())
+        .args(["--keyfile"])
+        .arg(fx.keyfile()));
+    assert!(out.status.success(), "get without --output must succeed");
+    assert_eq!(
+        fs::read(fx.home().join("report.bin")).unwrap(),
+        data,
+        "get must restore ./report.bin by default"
+    );
+}
+
 /// A 1-byte file exercises the sub-min-chunk path.
 #[test]
 fn single_byte_file_roundtrips() {

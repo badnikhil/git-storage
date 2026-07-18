@@ -89,9 +89,10 @@ enum Cmd {
         repo: PathBuf,
         #[arg(long)]
         keyfile: PathBuf,
-        /// Where to write the reconstructed file.
+        /// Where to write the reconstructed file. Defaults to the stored name
+        /// in the current directory (e.g. `get report.txt` writes `./report.txt`).
         #[arg(long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
         /// Read from a pinned log commit (snapshot read) instead of the tip.
         #[arg(long)]
         at: Option<String>,
@@ -213,7 +214,11 @@ fn main() -> Result<()> {
             keyfile,
             output,
             at,
-        } => get(&name, &repo, &keyfile, &output, at.as_deref()),
+        } => {
+            // Default the destination to the stored name in the current dir.
+            let output = output.unwrap_or_else(|| PathBuf::from(&name));
+            get(&name, &repo, &keyfile, &output, at.as_deref())
+        }
         Cmd::Ls { repo, keyfile, at } => ls(&repo, &keyfile, at.as_deref()),
         Cmd::Tip { repo, keyfile } => tip(&repo, &keyfile),
         Cmd::Stats { repo, keyfile } => stats(&repo, &keyfile),

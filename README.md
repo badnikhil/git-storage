@@ -125,7 +125,7 @@ git-storage init --repo ./store --keyfile ./master.key \
 
 git-storage put ./photo.raw     --repo ./store --keyfile ./master.key   # store a file
 git-storage ls                  --repo ./store --keyfile ./master.key   # list (metadata is encrypted)
-git-storage get photo.raw --output ./out.raw --repo ./store --keyfile ./master.key
+git-storage get photo.raw       --repo ./store --keyfile ./master.key   # writes ./photo.raw (--output to override)
 git-storage rm  photo.raw       --repo ./store --keyfile ./master.key   # logical delete
 git-storage stats               --repo ./store --keyfile ./master.key   # per-volume live/dead/budget
 git-storage compact             --repo ./store --keyfile ./master.key   # reclaim dead space (gated)
