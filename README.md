@@ -107,6 +107,8 @@ primary interface.
 
 ## Using it
 
+**→ See [USAGE.md](USAGE.md) for the simple, step-by-step guide.**
+
 The tool is a single binary (`cargo build --release` → `target/release/git-storage`).
 Every command needs a `--keyfile`: the master key that encrypts the store. **Lose
 the keyfile and the store is unrecoverable** — there is no backdoor, by design.
